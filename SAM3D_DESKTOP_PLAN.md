@@ -1,55 +1,79 @@
-# SAM3D Desktop Application — Comprehensive Implementation Plan
+# SAM3D Desktop Application — Comprehensive Implementation Plan (v2)
 
-> **Document purpose:** This is the single source of truth for building the Kotlin Multiplatform
-> Compose-for-Desktop wrapper around the SAM3D-GCODE Python pipeline. Any AI agent or developer
-> reading this document should treat it as the authoritative specification. Do **not** modify,
-> rewrite, or delete anything inside the `SAM3D-GCODE/` repository. That codebase is the engine.
-> This desktop app is the cockpit.
+> **Document purpose:** Single source of truth for building the Kotlin / Compose-for-Desktop
+> application that wraps the SAM3D-GCODE Python pipeline.  Any AI agent or developer reading this
+> document should treat it as the authoritative specification.
+>
+> **v2 changes from v1 (summary):**
+> - Integration strategy changed from Flask wrapper → **CLI subprocess** (zero Python changes required).
+> - Module layout changed from `:core` + `:desktop` → **single `:composeApp`** with
+>   `commonMain`/`jvmMain` source-set discipline (mobile refactor deferred).
+> - Annotation JSON schema corrected to match what the Python pipeline actually reads.
+> - Coordinate-frame math is now fully specified with a worked example.
+> - Pixel windowing changed to match Python's min-max normalisation.
+> - Coronal/sagittal rendering now keeps the full padded cube in memory (Python does this too).
+> - Slices default corrected to 120 (was 32, a copy-paste error).
+> - Flask endpoint table removed; replaced by CLI invocation contract.
+> - Cancellation and "Start Over" semantics are now coherent.
+> - Progress tracking uses stdout parsing (no Python changes needed).
+> - SAM checkpoint verification added to Start screen.
+> - Keyboard shortcuts moved from Phase 6 → Phase 4.
+> - Per-OS config paths, logging, test deps, and fixtures are now specified.
 
 ---
 
 ## 1. Project Overview
 
 ### 1.1 What We Are Building
-A cross-platform desktop application (initially macOS + Windows + Linux) that lets a non-technical
-clinician run the full SAM3D-GCODE pipeline end-to-end through a clean graphical wizard — without
-ever touching a terminal. The pipeline converts DICOM medical images (e.g., CT scans of a femur)
-into variable-density G-code files ready for 3D printing.
+A cross-platform desktop application (macOS, Windows, Linux) that lets a non-technical clinician
+run the full SAM3D-GCODE pipeline end-to-end through a graphical wizard — without ever touching a
+terminal.  The pipeline converts a DICOM CT folder into a variable-density G-code file ready for
+3D printing.
+
+The Python codebase lives in a **separate sibling directory** (`../SAM3D-GCODE/` relative to this
+repo).  Its exact path on disk is user-configured in `AppConfig`; the desktop app discovers it at
+runtime.
 
 ### 1.2 The Full Pipeline (end-to-end flow)
+
 ```
 DICOM folder
      │
      ▼
-[Step 1 – Start]      User picks DICOM folder & output folder. App spawns Python backend.
+[Step 1 – Start]      User picks DICOM folder, output folder, and SAM3D-GCODE directory.
+                       App verifies the Python binary and SAM checkpoint exist.
      │
      ▼
-[Step 2 – Prompting]  User draws green (positive) and red (negative) polylines on DICOM slices
-                       using the Compose Canvas DICOM viewer. Annotations are written to JSON
-                       files in a `tempdir` in the exact format that reprompting3d.py reads.
+[Step 2 – Prompting]  User draws green (positive) and red (negative) polylines on DICOM
+                       slices using the Compose Canvas viewer. Kotlin writes ONE file —
+                       tempdir/points.json — in the exact format that sam3d.py reads.
      │
      ▼
-[Step 3 – Inference]  App calls Flask /inference. Python runs SAM3D segmentation.
-                       Progress shown via stage-based determinate progress bar.
+[Steps 3-5 – Processing]
+                       Kotlin spawns:
+                         python sam3d.py \
+                           --reslice 0 --reprompt 0 \
+                           -p <dicomPath> -o <outputDir> \
+                           -r ico -s 120 -v 1 \
+                           --checkpoint checkpoints/sam_vit_h_4b8939.pth \
+                           --datatype dcm
+                       from the SAM3D-GCODE working directory.
+                       Progress is shown by parsing stdout / tqdm lines.
+                       Three sequential screens (Inference → Point Cloud → G-code) auto-advance
+                       based on stdout markers.
      │
      ▼
-[Step 4 – Point Cloud] App calls Flask /pointcloud. Python refines the 3D point cloud.
-                        No 3D viewer on the Kotlin side — delegated entirely to Python.
-                        Progress bar only.
-     │
-     ▼
-[Step 5 – G-code]     App calls Flask /variable-density then /gcode. Python runs Otsu +
-                        RegionBased + Voxels2GCode. Output .gcode file path shown to user
-                        with a "Reveal in Finder / Explorer" button.
+[Step 5 – Done]       Output .gcode path is shown with a "Reveal in Finder/Explorer" button.
 ```
 
-### 1.3 What We Are NOT Building
-- We are **not** rewriting, wrapping, or modifying any file inside `SAM3D-GCODE/` — no edits to
-  `sam3d.py`, `prompting.py`, `backend/app.py`, or any other Python file whatsoever.
-- We are **not** building a 3D point-cloud viewer (delegated to Python/Open3D).
-- We are **not** building a G-code preview renderer.
-- We are **not** building mobile (Android/iOS) yet — but the module structure **must** accommodate
-  it from day one.
+### 1.3 What We Are NOT Building (v1)
+- We do **not** rewrite, wrap, or modify any file inside `SAM3D-GCODE/`.
+- We do **not** build a 3D point-cloud viewer (delegated to Python/Open3D).
+- We do **not** build a G-code preview renderer.
+- We do **not** build a Flask HTTP layer — the app talks to Python via subprocess only.
+- We do **not** build mobile (Android/iOS) in v1.  The single `:composeApp` module uses
+  `commonMain` for platform-neutral code so a mobile source set can be added later with a
+  bounded refactor (move `jvmMain` logic into `commonMain` + add `iosMain`/`androidMain`).
 
 ---
 
@@ -57,13 +81,15 @@ DICOM folder
 
 | # | Constraint | Rationale |
 |---|-----------|-----------|
-| 1 | **Never touch `SAM3D-GCODE/` source files** | The Python engine is the research product. Any breakage there has scientific consequences. The desktop app wraps it via HTTP only. |
-| 2 | **All long-running work runs off the main thread** | Compose Desktop renders on the Swing EDT. Blocking it causes the UI to freeze. All I/O, HTTP calls, DICOM decoding, and subprocess management must use coroutines on `Dispatchers.IO`. |
-| 3 | **`:core` module must contain zero JVM-specific APIs** | `java.io.File`, `ProcessBuilder`, `BufferedImage` must live only in `:desktop`. `:core` uses `expect/actual` or purely Kotlin stdlib/KMP APIs so the module can be consumed by future Android/iOS targets. |
-| 4 | **Annotation JSON format must exactly match what `reprompting3d.py` / `scale_transform.py` parse** | Any schema drift = silent failure deep in the Python pipeline. Define one canonical data class in `:core` and write a single serializer. |
-| 5 | **No global mutable state** | All wizard state flows downward from a single `WizardViewModel` as immutable `StateFlow`. No `companion object` singletons, no static fields. |
-| 6 | **The Python process lifecycle is owned by the desktop app** | On app exit (even via force-quit / window close), the spawned Python process must be destroyed. Register a JVM shutdown hook. |
-| 7 | **DICOM pixel data is decoded off-thread and cached** | Decoding a full DICOM series can take seconds. Results are cached in a `LruCache<Int, ImageBitmap>`. The UI renders a loading placeholder until the bitmap is ready. |
+| 1 | **Never touch `SAM3D-GCODE/` source files** | The Python engine is the research product. |
+| 2 | **All long-running work runs off the main thread** | Compose Desktop's `Dispatchers.Main` dispatches to the Swing EDT via `kotlinx-coroutines-swing`. Blocking it freezes the UI. All I/O, DICOM decoding, subprocess management, and stdout parsing must use coroutines on `Dispatchers.IO` or `Dispatchers.Default`. |
+| 3 | **`commonMain` must contain zero `java.*` / JVM-only APIs** | `java.io.File`, `ProcessBuilder`, `BufferedImage` live only in `jvmMain`. `commonMain` uses Kotlin stdlib + Compose Multiplatform types so it can host a mobile source set in future. |
+| 4 | **Annotation JSON must exactly match what `sam3d.py` feeds to `scale_transform.parse_prompts`** | See §9 for the canonical schema. Any drift = silent inference failure. |
+| 5 | **No global mutable state** | All wizard state flows from a single `WizardViewModel` as `StateFlow<WizardState>`. No singletons. |
+| 6 | **The `sam3d.py` subprocess lifecycle is owned by the desktop app** | On app exit (including force-quit), the subprocess is destroyed via `Process.destroyForcibly()`. Register a JVM shutdown hook in `main.kt`. |
+| 7 | **DICOM pixel data is decoded off-thread and cached** | Decoding a full series takes seconds. Results are cached in an LRU cache keyed on `(axis, sliceIndex)`. The UI renders a loading shimmer until the bitmap is ready. |
+| 8 | **The DICOM viewer matches Python's normalisation** | Python's `utils.load3dmatrix` normalises to 0-255 via global min-max (`(pixel − min) / (max − min) × 255`). The Kotlin viewer must apply the same normalisation so the user annotates the image exactly as Python sees it. HU/windowing is v2. |
+| 9 | **The full padded cube is held in memory during the Prompting step** | Coronal and sagittal slices require re-slicing across all axial images. For a 512³ cube this is ≈128 MB — acceptable. Never load more than one series at a time. |
 
 ---
 
@@ -71,747 +97,1110 @@ DICOM folder
 
 | Layer | Choice | Justification |
 |-------|--------|---------------|
-| Language | Kotlin 2.x | Type safety, coroutines, multiplatform |
-| UI | Compose Multiplatform for Desktop (JVM target) | Single codebase with Android/iOS path; hardware-accelerated Skia rendering |
-| State management | `androidx.lifecycle:lifecycle-viewmodel-compose` | Same pattern as Android; works on desktop via KMP |
-| HTTP client | **Ktor Client** (CIO engine) | KMP-compatible; async; no extra threads needed |
-| JSON | `kotlinx.serialization` | KMP-native; fast; integrates with Ktor |
-| DICOM parsing | **dcm4che 5.x** (JVM) | Industry-standard; parses pixel data, metadata, multi-frame |
-| Coroutines | `kotlinx.coroutines-swing` | Provides `Dispatchers.Main` on Swing EDT for Compose Desktop |
+| Language | Kotlin 2.3.20 | Type safety, coroutines, multiplatform |
+| UI | Compose Multiplatform 1.10.3 (JVM target) | Skia GPU rendering; single codebase path to mobile |
+| State management | `org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose` 2.10.0 | Same MVI pattern as Android; works via KMP |
+| JSON | `kotlinx.serialization-json` 1.8.x | KMP-native; used only for `points.json` serialisation |
+| DICOM parsing | dcm4che 5.31.0 (JVM) | Industry-standard; handles pixel data, multi-frame, transfer syntaxes |
+| Coroutines | `kotlinx-coroutines-swing` 1.10.2 | Provides `Dispatchers.Main` on Swing EDT |
+| Python integration | `ProcessBuilder` + stdout parsing | Zero Python changes; subprocess per pipeline run |
 | Build | Gradle Kotlin DSL + Compose Desktop Gradle plugin | Already in scaffold |
-| Packaging | Compose Desktop `nativeDistributions` | `.dmg` / `.msi` / `.deb` without bundling Node |
+| Packaging | `nativeDistributions` | `.dmg` / `.msi` / `.deb` without bundling Node or Python |
+| Logging | `slf4j-api` + `slf4j-simple` | Lightweight; Python stdout → per-run log file |
 
-> **Why not Ktor for DICOM?** DICOM parsing is a JVM-only concern and lives in `:desktop`. Ktor
-> lives in `:core` as an interface / expect-actual pattern so mobile can substitute a different
-> HTTP engine.
+> **Why no Ktor?** There is no HTTP layer. The Python pipeline is invoked as a subprocess.
+> `kotlinx.serialization` is used only to read and write `points.json`.
+
+> **Version note:** Verify `dcm4che 5.31.0` and `lifecycle-viewmodel-compose 2.10.0` exist in
+> Maven Central before starting Phase 1. Pin exact versions in `libs.versions.toml`; do not use
+> `+` or `x` wildcards.
 
 ---
 
-## 4. Module Architecture
+## 4. Module Architecture (single `:composeApp`)
+
+The project uses **one Gradle module** — the existing `:composeApp` — with two source sets:
 
 ```
-sam3d/                          ← Gradle root project
-├── :core                       ← Pure KMP module — NO JVM APIs
+composeApp/src/
+├── commonMain/kotlin/edu/upenn/sam3d/
 │   ├── domain/
-│   │   ├── model/              ← Data classes (DicomSeries, Annotation, PipelineStage, etc.)
-│   │   ├── repository/         ← Interfaces (DicomRepository, PipelineRepository)
-│   │   └── usecase/            ← Business logic (LoadDicomUseCase, SaveAnnotationsUseCase, etc.)
-│   ├── api/
-│   │   ├── PipelineApiClient   ← Ktor HTTP calls to Flask (interface + impl)
-│   │   └── dto/                ← Request/Response data classes with @Serializable
+│   │   ├── model/
+│   │   │   ├── DicomSeries.kt         ← data class, Kotlin stdlib types only
+│   │   │   ├── SliceAnnotation.kt
+│   │   │   ├── PipelineProgress.kt
+│   │   │   ├── PipelineStage.kt       ← enum
+│   │   │   ├── WizardStep.kt          ← enum
+│   │   │   └── Axis.kt                ← enum (AXIS_0, AXIS_1, AXIS_2)
+│   │   ├── repository/
+│   │   │   ├── DicomRepository.kt     ← interface (returns ImageBitmap — CM type)
+│   │   │   └── PipelineRepository.kt  ← interface
+│   │   └── usecase/
+│   │       ├── LoadDicomUseCase.kt
+│   │       └── SaveAnnotationsUseCase.kt
 │   └── state/
-│       ├── WizardState.kt      ← Sealed class for all wizard states
-│       └── WizardViewModel.kt  ← Single shared ViewModel
+│       ├── WizardState.kt
+│       ├── WizardIntent.kt
+│       └── WizardViewModel.kt
 │
-├── :desktop                    ← JVM-only module
-│   ├── main.kt                 ← application { } entry point
-│   ├── dicom/
-│   │   ├── Dcm4cheLoader.kt    ← Implements DicomRepository using dcm4che
-│   │   └── DicomBitmapCache.kt ← LRU cache: slice index → ImageBitmap
-│   ├── process/
-│   │   └── PythonProcessManager.kt  ← Spawns/kills Flask backend
-│   ├── ui/
-│   │   ├── wizard/
-│   │   │   ├── WizardShell.kt       ← NavigationRail + content area layout
-│   │   │   ├── StartScreen.kt
-│   │   │   ├── PromptingScreen.kt
-│   │   │   ├── InferenceScreen.kt
-│   │   │   ├── PointCloudScreen.kt
-│   │   │   └── GCodeScreen.kt
-│   │   ├── canvas/
-│   │   │   ├── DicomCanvas.kt       ← Compose Canvas for rendering slices
-│   │   │   └── AnnotationOverlay.kt ← Polyline drawing layer on top of DICOM
-│   │   └── components/
-│   │       ├── StageProgressBar.kt  ← Determinate multi-stage progress
-│   │       ├── BackendStatusBadge.kt
-│   │       └── FilePicker.kt        ← JVM AWT file chooser wrapped in coroutine
-│   └── theme/
-│       └── AppTheme.kt
-│
-└── build.gradle.kts (root)
+└── jvmMain/kotlin/edu/upenn/sam3d/
+    ├── main.kt                         ← application { } entry point
+    ├── AppConfig.kt                    ← paths, defaults, stdout markers
+    ├── dicom/
+    │   ├── Dcm4cheLoader.kt            ← implements DicomRepository
+    │   └── DicomBitmapCache.kt         ← LRU cache: (Axis, sliceIndex) → ImageBitmap
+    ├── process/
+    │   ├── PythonProcessManager.kt     ← spawns / kills sam3d.py subprocess
+    │   └── StdoutProgressParser.kt     ← stdout line → PipelineProgress?
+    └── ui/
+        ├── App.kt
+        ├── theme/AppTheme.kt
+        ├── wizard/
+        │   ├── WizardShell.kt
+        │   ├── StartScreen.kt
+        │   ├── PromptingScreen.kt
+        │   ├── ProcessingScreen.kt     ← shared screen for Steps 3-5 (auto-advances)
+        │   └── DoneScreen.kt
+        ├── canvas/
+        │   ├── DicomCanvas.kt
+        │   └── AnnotationOverlay.kt
+        └── components/
+            ├── StageProgressBar.kt
+            ├── CheckpointDownloadBar.kt
+            ├── FilePicker.kt
+            └── WindowingControls.kt
 ```
 
-### 4.1 Module Dependency Graph
-```
-:desktop  ──depends on──►  :core
-                              │
-                         (interfaces)
-                              │
-                         [Ktor, kotlinx.serialization, coroutines]
-```
+### 4.1 Source-set discipline rules
 
-`:desktop` is allowed to use all JVM APIs. `:core` is forbidden from importing anything from
-`java.*` beyond what Kotlin stdlib already provides via `expect/actual`.
+| Allowed in `commonMain` | Forbidden in `commonMain` |
+|------------------------|--------------------------|
+| Kotlin stdlib | `java.*` (except via Kotlin stdlib `expect`/`actual`) |
+| Compose Multiplatform types (`ImageBitmap`, `Offset`, `Canvas`) | `ProcessBuilder`, `java.io.File` |
+| `kotlinx.coroutines` (not `-swing`) | `java.awt.*`, `javax.*` |
+| `kotlinx.serialization` | dcm4che |
+| `androidx.lifecycle` KMP | `slf4j` (JVM-only) |
 
 ---
 
 ## 5. Wizard Flow & Screen Specifications
 
 ### 5.1 Shell Layout
-The outermost window uses a two-column layout:
-- **Left column (240 dp):** NavigationRail with 5 labeled steps. Steps before the current step are
-  marked complete (checkmark icon). Steps after are locked (disabled). Current step is highlighted.
-- **Right column (fill):** Content area that swaps between screens based on current step.
-- **Top bar:** App name left, `BackendStatusBadge` right (pulsing green dot = connected, red = not).
-- **Bottom bar:** "Back" (left) and "Next / Run" (right) buttons. "Next" is disabled if the
-  current step's prerequisites are not met.
+Two-column layout:
+- **Left (240 dp):** NavigationRail with 5 labeled steps. Completed steps show a checkmark.
+  Future steps are disabled. Current step is highlighted.
+- **Right (fill):** Content area that swaps between wizard screens.
+- **Top bar:** App name left, Python verification status right (green ✓ = ready, red ✗ = not
+  configured).
+- **Bottom bar:** "Back" (left), "Next / Run" (right). "Next" is disabled until prerequisites
+  are met.
 
 ### 5.2 Step 1 — Start
 
-**Goal:** Collect inputs and confirm the backend is alive.
+**Goal:** Collect paths, verify the Python environment, verify the SAM checkpoint.
 
 **UI elements:**
-- DICOM folder picker (shows selected path in a read-only text field)
+- SAM3D-GCODE directory picker (where `sam3d.py` lives)
+- DICOM folder picker
 - Output folder picker (defaults to `~/Documents/SAM3D-Output/`)
-- Backend status indicator with a "Retry" button if not connected
-- "Next" button is **disabled** until: (a) a DICOM folder is selected, (b) backend is connected
+- Python binary path (auto-detected from `AppConfig`; editable)
+- Checkpoint status row: green if `checkpoints/sam_vit_h_4b8939.pth` exists inside the
+  SAM3D-GCODE dir; if missing, shows a "Download checkpoint (2.5 GB)" button
+- "Next" disabled until: DICOM folder selected, SAM3D-GCODE dir valid, Python binary verified,
+  checkpoint present
 
 **Under the hood:**
-1. `PythonProcessManager.start()` is called when this screen is first shown (not on app launch).
-2. A coroutine on `Dispatchers.IO` polls `GET /healthcheck` every 1 second for up to 30 seconds.
-3. On success, `WizardViewModel` transitions `backendState` to `BackendState.Connected`.
-4. `LoadDicomUseCase` loads DICOM metadata (slice count, dimensions, patient info) in the
-   background so the Prompting screen has it ready immediately.
+1. When SAM3D-GCODE dir or Python path changes, run `python --version` as a short subprocess to
+   verify the binary works. Emit `PythonStatus.VERIFIED` or `PythonStatus.ERROR(stderr)`.
+2. Check `<sam3dGcodeDir>/checkpoints/sam_vit_h_4b8939.pth` with `Files.exists`.
+3. If checkpoint missing and user clicks "Download", spawn:
+   ```
+   <pythonExe> <sam3dGcodeDir>/download_checkpoint.py
+   ```
+   Stream stdout to `CheckpointDownloadBar` (parses tqdm percentage lines).
+4. `LoadDicomUseCase` starts loading DICOM metadata in the background when the DICOM folder is
+   selected, so Step 2 has it ready immediately.
 
-**Pipeline config (hidden from user, in `config.json` or hardcoded constants):**
+**Pipeline config (hidden from user, in `AppConfig`):**
 ```kotlin
 object PipelineDefaults {
-    const val ROTATIONS = "ico"
-    const val SLICES = 32
+    const val ROTATIONS  = "ico"
+    const val SLICES     = 120   // matches sam3d.py default
     const val SAM_VERSION = 1
     const val CHECKPOINT = "checkpoints/sam_vit_h_4b8939.pth"
-    const val DATATYPE = "dcm"
+    const val DATATYPE   = "dcm"
 }
 ```
 
 ### 5.3 Step 2 — Prompting (DICOM Annotation)
 
-This is the most complex screen. It is the heart of the desktop app.
+**Goal:** Let the user draw green (positive) and red (negative) polylines on DICOM slices.
+Write a single `tempdir/points.json` in the exact format that `sam3d.py` feeds to
+`scale_transform.parse_prompts`. See §9 for the schema.
 
-**Goal:** Let the user draw green (positive) and red (negative) polylines on DICOM slices. Save
-annotations to the `tempdir` in the exact JSON format that the Python pipeline reads.
-
-**UI Layout (single-pane + axis switcher):**
+**UI Layout:**
 ```
 ┌─────────────────────────────────────────────────────┐
-│  [Axial] [Coronal] [Sagittal]    Slice: 45 / 128   │  ← axis toggle + slice label
-│                                                      │
+│  [Axis 0] [Axis 1] [Axis 2]    Slice: 45 / 512     │  ← axis toggle + slice label
+│  (Typical CT: Axis 2 = axial, 0 = sagittal,        │
+│   1 = coronal — assumes canonical orientation)      │
 │  ┌────────────────────────────────────────────────┐ │
-│  │                                                │ │
-│  │              DICOM CANVAS                      │ │  ← Compose Canvas, fills space
-│  │     (gray-scale rendered DICOM slice)          │ │
+│  │              DICOM CANVAS                      │ │
+│  │     (min-max normalised grayscale slice)       │ │
 │  │     + green polylines overlay                  │ │
 │  │     + red polylines overlay                    │ │
-│  │                                                │ │
 │  └────────────────────────────────────────────────┘ │
+│  [Slice slider ─────────────────────────────────]   │
 │                                                      │
-│  [Slice slider  ────────────────────────────────]   │  ← scrollable, also mouse-wheel
-│                                                      │
-│  Drawing mode: [● Positive (Green)] [○ Negative (Red)]  │
+│  Drawing mode: [● Positive (Green)] [○ Negative (Red)]│
 │  [New Line]  [Delete Last Point]  [Clear This Slice] │
-│  Annotations: 3 slices annotated                     │
+│  Keyboard: A toggle ± | W new pos line | S new neg line│
+│            D delete point | ←→ slice ±1 | 0/1/2 axis │
+│  Annotations: 3 slices annotated                    │
 └─────────────────────────────────────────────────────┘
 ```
 
 **DicomCanvas implementation:**
-- Uses `Canvas(modifier = Modifier.fillMaxSize().pointerInput(...))`.
-- The raw DICOM pixel array (Hounsfield units) is windowed (window center/width) and normalized
-  to 0–255. This produces a grayscale `ImageBitmap`.
-- Windowing defaults: `windowCenter = 400`, `windowWidth = 1500` (bone window) — user-adjustable
-  via a small slider in a collapsed "Display" section.
-- Bitmap rendering: `drawImage(bitmap, ...)` on the Compose `DrawScope`.
-- Polyline rendering: `drawLine(...)` / `drawCircle(...)` over the bitmap.
+- Backed by the **padded cube** (see §8 — the full S×S×S volume is in memory).
+- Pixel values are the result of Python-equivalent min-max normalisation (see §8.1 for formula).
+- `Canvas(modifier = Modifier.fillMaxSize())` with letterbox scaling (preserves aspect ratio;
+  equal black bars on two sides if slice is not square).
+- Bitmap: `drawImage(bitmap, dstOffset, dstSize)` inside `Canvas {}` — Skia-accelerated.
+- Polylines: `drawLine` / `drawCircle` in the display rect coordinate space.
 
-**Pointer events:**
-- `detectDragGestures` + `detectTapGestures` are combined via `pointerInput`.
-- While dragging, append `(x, y)` to the current active polyline.
-- On tap, add a single point.
-- Store all coordinates as **normalized floats** (0.0–1.0) internally, convert to pixel-space for
-  rendering and to (row, col, 0) format for JSON export.
+**Pointer events — implementation pattern:**
+Use `awaitPointerEventScope` (not `detectDragGestures` + `detectTapGestures`, which conflict):
+```kotlin
+Modifier.pointerInput(activePolylineKey) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull() ?: continue
+            when {
+                change.pressed && !change.previousPressed -> onPointerDown(change.position)
+                change.pressed  -> onPointerMove(change.position)
+                !change.pressed && change.previousPressed -> onPointerUp()
+            }
+            change.consume()
+        }
+    }
+}
+```
+
+**Coordinate system — see §8 for the full worked example.**
+Internal annotation coordinates are stored in **padded-cube voxel space** — no normalisation to
+0.0-1.0. Convert display-rect pixel coords to cube voxel coords on every pointer event.
 
 **Annotation state (per axis, per slice):**
 ```kotlin
+// in commonMain/domain/model/SliceAnnotation.kt
 data class SliceAnnotation(
-    val axisIndex: Int,      // 0=axial, 1=coronal, 2=sagittal
-    val sliceIndex: Int,
-    val positivePolylines: List<List<Pair<Float, Float>>>,  // normalized coords
-    val negativePolylines: List<List<Pair<Float, Float>>>
+    val axis: Axis,               // AXIS_0, AXIS_1, AXIS_2
+    val sliceIndex: Int,          // index into the padded cube along this axis
+    val positivePolylines: List<List<IntArray>>,   // each IntArray is [x, y, z] in cube voxels
+    val negativePolylines: List<List<IntArray>>
 )
 ```
 
-**JSON export format** (must exactly match what `reprompting3d.py` writes/reads):
-```json
-{
-  "pos": [[[row, col, 0], [row, col, 0], ...], ...],
-  "neg": [[[row, col, 0], [row, col, 0], ...], ...]
-}
-```
-One JSON file per slice view. File naming must match the convention used by `prompting.py` and
-`scale_transform.py`. **Before implementing, read both files to confirm exact filename patterns.**
+> **Coordinate convention:** A point on Axis 2, slice 45 is stored as `[x_voxel, y_voxel, 45]`.
+> On Axis 0, slice 45: `[45, y_voxel, z_voxel]`. See §8 for the derivation.
 
-**"Next" is enabled when:** at least one positive polyline exists on at least one slice.
+**"Next" enabled when:** ≥1 positive polyline on ≥1 slice.
 
 **On "Next":**
-1. `SaveAnnotationsUseCase` writes all `SliceAnnotation` objects to the `tempdir` as JSON.
-2. A POST to `GET /prompt` with the tempdir path confirms handoff.
-3. Transition to Step 3.
+1. `SaveAnnotationsUseCase` merges all `SliceAnnotation` objects into the single
+   `tempdir/points.json` format (§9) and writes to `<sam3dGcodeDir>/tempdir/points.json`.
+   `tempdir/` is created by Kotlin at this point; any previous tempdir is deleted first.
+2. Transition to Step 3.
 
-### 5.4 Step 3 — Inference
+### 5.4 Step 3 — Inference (auto-advances)
 
-**Goal:** Trigger SAM3D inference and show progress.
-
-**UI:**
-```
-┌─────────────────────────────────────────────────────┐
-│  Running segmentation inference…                     │
-│                                                      │
-│  Stage 1/4: Loading DICOM volume          [████░░]  │
-│  Stage 2/4: Running SAM inference         [██░░░░]  │
-│  Stage 3/4: Collecting point cloud        [░░░░░░]  │
-│  Stage 4/4: Building voxel mask           [░░░░░░]  │
-│                                                      │
-│  Elapsed: 00:01:23                                   │
-└─────────────────────────────────────────────────────┘
-```
-
-- Progress is driven by polling `GET /inference/status` (a new endpoint the Flask backend needs
-  to expose — see §8.2 for the contract). The endpoint returns `{"stage": 2, "total_stages": 4,
-  "stage_label": "Running SAM inference"}`.
-- Poll interval: 2 seconds on `Dispatchers.IO`.
-- "Back" is disabled during inference (cannot interrupt). "Cancel" button is visible.
-- On cancel, the app sends `POST /inference/cancel` and kills the Python subprocess.
-
-### 5.5 Step 4 — Point Cloud
-
-**Goal:** Trigger point-cloud refinement. No 3D visualization in the Kotlin UI.
+On transition from Step 2, `PythonProcessManager.start()` is called. It spawns `sam3d.py` and
+begins reading stdout.
 
 **UI:**
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Refining point cloud…                              │
+│  Stage 1/5: Loading DICOM volume        [████░░░░]  │
+│  Elapsed: 00:00:12                                   │
 │                                                      │
-│  The segmentation mask is being converted to a 3D   │
-│  point cloud and refined.                            │
-│                                                      │
-│  [████████████████░░░░]  68%                        │
-│                                                      │
-│  Elapsed: 00:00:45                                   │
+│                              [Cancel]                │
 └─────────────────────────────────────────────────────┘
 ```
 
-- Triggers `POST /pointcloud` with hardcoded default parameters (downsample=1, outliers=1,
-  n_neighbors=24 for ico rotation, radius=0.02, iterations=4).
-- Polls `GET /pointcloud/status` for progress.
+- Each `StdoutProgressParser` emission drives the progress bar.
+- "Back" is disabled while the subprocess is running.
+- "Cancel" calls `PythonProcessManager.cancel()` → `Process.destroyForcibly()` → deletes tempdir
+  → resets `WizardState` to `START` step.
 
-### 5.6 Step 5 — G-code Export
+### 5.5 Step 4 — Point Cloud (auto-advances)
 
-**Goal:** Trigger variable-density + G-code generation and surface the output file.
+Same `ProcessingScreen` composable, different stage label. Auto-advances when stdout emits the
+point-cloud completion marker (see §7).
 
-**UI:**
+### 5.6 Step 5 — G-code (auto-advances to Done)
+
+Same `ProcessingScreen`. When `sam3d.py` exits with code 0, transition to `DoneScreen`.
+
+### 5.7 Done Screen
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │  ✓  G-code generated successfully!                  │
 │                                                      │
 │  Output file:                                        │
-│  /Users/andrew/Documents/SAM3D-Output/output.gcode  │
+│  /Users/…/SAM3D-Output/output.gcode                 │
 │                                                      │
 │  [  Reveal in Finder  ]    [ Start Over ]           │
 │                                                      │
-│  ─────────────────────────────────────────────────  │
 │  Processing summary:                                 │
 │  • Total time: 4 min 12 sec                         │
 │  • Slices annotated: 6                              │
-│  • Point cloud points: 84,219                       │
 └─────────────────────────────────────────────────────┘
 ```
 
-- `POST /variable-density` then `POST /gcode`.
-- On success, display the output path and a "Reveal in Finder/Explorer" button
-  (`Desktop.getDesktop().browseFileDirectory(file)`).
-- "Start Over" resets the `WizardViewModel` to initial state and returns to Step 1.
-  The Python process is **not** killed — it stays alive for the next run.
+- "Reveal in Finder/Explorer/Files" is OS-specific (see §6.4).
+- "Start Over" → `PythonProcessManager.reset()` (subprocess already exited) → delete tempdir →
+  reset `WizardState` to initial → navigate to Step 1.
 
 ---
 
 ## 6. Core Components — Detailed Specifications
 
-### 6.1 PythonProcessManager (`:desktop`)
+### 6.1 PythonProcessManager (jvmMain)
 
 ```kotlin
 class PythonProcessManager(
-    private val pythonExe: Path,        // e.g., conda env python binary
-    private val backendScript: Path,    // SAM3D-GCODE/backend/app.py
-    private val workingDir: Path
+    private val pythonExe: Path,       // e.g., conda env python binary
+    private val sam3dScript: Path,     // <sam3dGcodeDir>/sam3d.py
+    private val workingDir: Path,      // <sam3dGcodeDir> — MUST be the SAM3D-GCODE root
+    private val parser: StdoutProgressParser
 ) {
     private var process: Process? = null
+    private val _progress = MutableStateFlow<PipelineProgress?>(null)
+    val progress: StateFlow<PipelineProgress?> = _progress.asStateFlow()
 
-    fun start(): Job  // returns coroutine Job that completes once /healthcheck succeeds
-    fun stop()        // destroy process, called from JVM shutdown hook
+    // Returns a Job; completes when sam3d.py exits (success or error)
+    fun start(
+        dicomPath: Path,
+        outputDir: Path,
+        config: PipelineDefaults = PipelineDefaults
+    ): Job
+
+    fun cancel()            // destroyForcibly(); resets _progress
     fun isRunning(): Boolean
 }
 ```
 
-**Implementation notes:**
-- Use `ProcessBuilder` with `inheritIO()` suppressed — redirect stdout/stderr to a log file in the
-  app's data directory so crashes are debuggable.
-- Spawn on `Dispatchers.IO`.
-- Register shutdown hook in `main()`:
-  ```kotlin
-  Runtime.getRuntime().addShutdownHook(Thread { pythonProcessManager.stop() })
-  ```
-- On first launch, if no Python executable is configured, show an error dialog pointing user to
-  the README. Store the path in a `preferences.json` file in the OS user-data directory.
+**Invocation inside `start()`:**
+```kotlin
+val cmd = listOf(
+    pythonExe.toString(), sam3dScript.toString(),
+    "--reslice", "0",        // do NOT wipe tempdir — Kotlin already wrote points.json
+    "--reprompt", "0",       // skip the Tk annotation GUI
+    "-p", dicomPath.toString(),
+    "-o", outputDir.toString(),
+    "-r", config.ROTATIONS,
+    "-s", config.SLICES.toString(),
+    "-v", config.SAM_VERSION.toString(),
+    "--checkpoint", config.CHECKPOINT,
+    "--datatype", config.DATATYPE
+)
+val pb = ProcessBuilder(cmd)
+    .directory(workingDir.toFile())         // CRITICAL: relative paths in sam3d.py need this
+    .redirectErrorStream(true)              // merge stderr into stdout
+process = pb.start()
+```
 
-**Where to find the Python binary:**
-- Check `AppConfig.pythonPath` (from `~/.config/sam3d/config.json`).
-- If not set, try `conda run -n SAM3D_GCODE python` as a fallback.
-- If all fail, show a one-time setup dialog.
+**Stdout reading loop (on `Dispatchers.IO`):**
+```kotlin
+process!!.inputStream.bufferedReader().use { reader ->
+    reader.lines().forEach { line ->
+        logger.debug("sam3d> {}", line)
+        parser.parseLine(line)?.let { progress -> _progress.value = progress }
+    }
+}
+val exitCode = process!!.waitFor()
+if (exitCode != 0) _progress.value = PipelineProgress(PipelineStage.ERROR, exitCode)
+```
 
-### 6.2 Dcm4cheLoader (`:desktop`)
+**Stdout is always written to a log file** in the user data directory:
+```
+<userDataDir>/SAM3D/logs/sam3d-<ISO_TIMESTAMP>.log
+```
+Even if the UI crashes, the full Python output is preserved for debugging.
+
+**JVM shutdown hook (in `main.kt`):**
+```kotlin
+Runtime.getRuntime().addShutdownHook(Thread {
+    pythonProcessManager.cancel()
+})
+```
+
+**Python binary discovery (in `AppConfig`):**
+1. Check `userConfig.pythonPath`.
+2. Try `which python3` / `where python3` as a fallback.
+3. If all fail, `Start` screen shows an error row asking the user to enter the path manually.
+
+### 6.2 StdoutProgressParser (jvmMain)
+
+Maps stdout lines to `PipelineProgress` objects.
+
+```kotlin
+data class PipelineProgress(
+    val stage: PipelineStage,
+    val stagePercentage: Float = 0f,   // 0.0–1.0; from tqdm if parseable, else 0
+    val elapsedSeconds: Long = 0L,
+    val outputPath: String? = null     // non-null only at COMPLETE
+)
+
+enum class PipelineStage(val label: String) {
+    LOADING_DICOM("Loading DICOM volume"),
+    PREPARING_SLICES("Preparing slice views"),
+    RUNNING_INFERENCE("Running SAM inference"),
+    BUILDING_POINT_CLOUD("Building point cloud"),
+    GENERATING_GCODE("Generating G-code"),
+    COMPLETE("Complete"),
+    ERROR("Error")
+}
+```
+
+**Marker table** (verify by running `python sam3d.py ... 2>&1 | tee dry_run.log` and annotating
+each print statement; commit `dry_run.log` to the test resources folder):
+
+| stdout substring | → Stage |
+|-----------------|---------|
+| `"image loaded"` | `PREPARING_SLICES` |
+| `"Making prompt slices"` | `PREPARING_SLICES` |
+| `"transforms made"` (or after tqdm for slices) | `RUNNING_INFERENCE` |
+| `"point cloud"` (case-insensitive) | `BUILDING_POINT_CLOUD` |
+| `"gcode"` or `"G-code"` (case-insensitive) | `GENERATING_GCODE` |
+| tqdm line `"NNN/NNN"` | parse percentage for current stage |
+
+> **Brittleness note:** If `sam3d.py` changes its print statements, progress display breaks but
+> correctness does not. Document the markers in `AppConfig.ProgressMarkers` as a named map so
+> updating them is a one-line change.
+
+**tqdm percentage parsing:**
+tqdm emits lines like `Making prompt slices: 42%|████  | 5/12 [00:15<00:21,  3s/it]`.
+Regex: `(\d+)%\|\S*\s*\|\s*(\d+)/(\d+)`.  Extract `current/total` for fine-grained progress.
+
+### 6.3 Dcm4cheLoader (jvmMain)
 
 ```kotlin
 class Dcm4cheLoader : DicomRepository {
-    override suspend fun loadSeries(folderPath: Path): DicomSeries
-    override suspend fun loadSliceBitmap(series: DicomSeries, axis: Axis, index: Int): ImageBitmap
+    override suspend fun loadSeries(folderPath: String): DicomSeries
+    override suspend fun loadSliceBitmap(series: DicomSeries, axis: Axis, index: Int): ImageBitmap?
 }
 ```
 
-**`DicomSeries` data class (in `:core`):**
+**`DicomSeries` data class (commonMain):**
 ```kotlin
 data class DicomSeries(
     val folderPath: String,
-    val axialCount: Int,
-    val coronalCount: Int,
-    val sagittalCount: Int,
-    val width: Int,
-    val height: Int,
-    val pixelSpacingMm: Pair<Double, Double>,
-    val sliceThicknessMm: Double,
-    val windowCenter: Int,
-    val windowWidth: Int
+    val cubeSize: Int,          // S — the side length of the padded cube
+    val rawShape: Triple<Int, Int, Int>,  // H × W × N before padding
+    // Axis 2 corresponds to original DICOM slice direction
 )
 ```
 
-**Bitmap caching:**
-- Key: `Triple(axis, sliceIndex, windowPreset)`.
-- Max cache size: 128 bitmaps (configurable). Each DICOM slice at 512×512 is ~1 MB as ARGB.
-  128 slices = ~128 MB peak. Acceptable.
-- Use a `LinkedHashMap`-backed LRU or `androidx.collection.LruCache`.
-- Pre-fetch: when user is on slice N, pre-decode slices N+2 and N−2 in the background on
-  `Dispatchers.Default`.
+**Loading sequence:**
+1. `loadSeries`: scan `.dcm` files, sort by `ImagePositionPatient[2]` (or `SliceLocation`).
+   If no valid position tag exists, sort by filename.  Load pixel arrays, global-min-max
+   normalise (matching `utils.load3dmatrix`), stack into `H×W×N` volume, pad to `S×S×S`
+   (`padtocube`).  Store the padded cube in memory as a `ByteArray`.
+2. `loadSliceBitmap`: slice the in-memory cube along `axis` at `index`, convert to grayscale
+   `ImageBitmap`.
 
-**Pixel windowing formula:**
+**Min-max normalisation formula (matches `utils.py:28`):**
 ```kotlin
-fun windowHU(hu: Int, center: Int, width: Int): Int {
-    val lo = center - width / 2
-    val hi = center + width / 2
-    return ((hu - lo).toFloat() / (hi - lo) * 255).toInt().coerceIn(0, 255)
-}
-```
-Apply this per-pixel then pack into a grayscale `ImageBitmap` using `toArgb()`.
-
-### 6.3 DicomCanvas + AnnotationOverlay (`:desktop/ui/canvas`)
-
-These are two composables that layer on top of each other:
-
-```kotlin
-@Composable
-fun DicomCanvas(
-    bitmap: ImageBitmap?,            // null = show loading shimmer
-    annotations: SliceAnnotation,
-    drawingMode: DrawingMode,        // POSITIVE or NEGATIVE
-    onPointerDown: (Offset) -> Unit,
-    onPointerMove: (Offset) -> Unit,
-    onPointerUp: () -> Unit,
-    modifier: Modifier = Modifier
-)
-```
-
-**Performance rules for DicomCanvas:**
-- The `drawImage(bitmap)` call is inside `Canvas {}` — it is Skia-native and hardware accelerated.
-  Do **not** wrap it in `Image()` composable (causes unnecessary recomposition).
-- Polyline data is passed as stable `@Immutable` annotated classes to prevent spurious
-  recomposition of the canvas when unrelated state changes.
-- Use `remember { mutableStateOf<ImageBitmap?>(null) }` local to the composable and launch a
-  `LaunchedEffect(sliceIndex, axis)` that fetches the bitmap from the cache/loader.
-- Avoid `derivedStateOf` chains longer than 2 levels.
-
-**Coordinate system:**
-- All internal annotation coordinates are stored normalized (0.0–1.0) relative to canvas size.
-- When rendering: multiply by `canvas.size.width` / `.height`.
-- When exporting to JSON: multiply by the DICOM pixel dimensions (width × height) to get
-  `(row, col, 0)` in pixel space.
-
-### 6.4 PipelineApiClient (`:core`)
-
-```kotlin
-interface PipelineApiClient {
-    suspend fun healthcheck(): Boolean
-    suspend fun submitPrompt(tempDirPath: String): Result<Unit>
-    suspend fun startInference(config: InferenceConfig): Result<Unit>
-    suspend fun getInferenceStatus(): Result<PipelineStatus>
-    suspend fun cancelInference(): Result<Unit>
-    suspend fun startPointCloud(config: PointCloudConfig): Result<Unit>
-    suspend fun getPointCloudStatus(): Result<PipelineStatus>
-    suspend fun startVariableDensity(): Result<Unit>
-    suspend fun getVariableDensityStatus(): Result<PipelineStatus>
-}
-
-data class PipelineStatus(
-    val stage: Int,
-    val totalStages: Int,
-    val stageLabel: String,
-    val elapsedSeconds: Long
-)
-```
-
-Implement with Ktor CIO client. Use `Result<T>` wrapping so callers never throw.
-
-### 6.5 WizardViewModel (`:core`)
-
-```kotlin
-data class WizardState(
-    val currentStep: WizardStep = WizardStep.START,
-    val dicomFolderPath: String? = null,
-    val outputFolderPath: String? = null,
-    val dicomSeries: DicomSeries? = null,
-    val annotations: List<SliceAnnotation> = emptyList(),
-    val backendStatus: BackendStatus = BackendStatus.DISCONNECTED,
-    val inferenceProgress: PipelineStatus? = null,
-    val pointCloudProgress: PipelineStatus? = null,
-    val gcodeProgress: PipelineStatus? = null,
-    val outputGcodePath: String? = null,
-    val error: String? = null
-)
-
-enum class WizardStep { START, PROMPTING, INFERENCE, POINT_CLOUD, GCODE }
-enum class BackendStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
-```
-
-The ViewModel exposes a single `StateFlow<WizardState>` and a set of `fun handle(intent: WizardIntent)` functions. This is the **MVI pattern** — unidirectional data flow.
-
-```kotlin
-sealed class WizardIntent {
-    data class SelectDicomFolder(val path: String) : WizardIntent()
-    data class SelectOutputFolder(val path: String) : WizardIntent()
-    object StartBackend : WizardIntent()
-    object ProceedToPrompting : WizardIntent()
-    data class AddAnnotationPoint(val axis: Axis, val sliceIdx: Int, val point: Offset, val mode: DrawingMode) : WizardIntent()
-    object NewPolyline : WizardIntent()
-    object ProceedToInference : WizardIntent()
-    object CancelOperation : WizardIntent()
-    object StartOver : WizardIntent()
-    // ... etc.
-}
-```
-
----
-
-## 7. Flask Backend — Required Endpoint Contracts
-
-The existing `backend/app.py` has stub endpoints. The Kotlin app will call these. The Python-side
-developer (NOT us — we do not touch these files) must implement the following contracts.
-
-> **We provide this contract as documentation only. We do not write Python code.**
-
-| Endpoint | Method | Request | Response |
-|----------|--------|---------|----------|
-| `/healthcheck` | GET | — | `{"status": "ok"}` |
-| `/prompt` | POST | `{"tempdir": "/abs/path/to/tempdir"}` | `{"ok": true}` |
-| `/inference` | POST | `{"config": {...}}` | `{"ok": true}` |
-| `/inference/status` | GET | — | `{"stage": 2, "total_stages": 4, "stage_label": "...", "elapsed_seconds": 83}` |
-| `/inference/cancel` | POST | — | `{"ok": true}` |
-| `/pointcloud` | POST | `{"downsample": 1, "n_neighbors": 24, "radius": 0.02, "iterations": 4}` | `{"ok": true}` |
-| `/pointcloud/status` | GET | — | `{"stage": 1, "total_stages": 2, "stage_label": "...", "elapsed_seconds": 45}` |
-| `/variable-density` | POST | — | `{"ok": true}` |
-| `/variable-density/status` | GET | — | `{"stage": 1, "total_stages": 3, "stage_label": "...", "elapsed_seconds": 12}` |
-| `/gcode/status` | GET | — | `{"stage": 1, "total_stages": 1, "stage_label": "...", "elapsed_seconds": 5, "output_path": "/abs/..."}` |
-
----
-
-## 8. Performance Guidelines (Desktop-Specific)
-
-### 8.1 Compose Desktop Performance Rules
-
-| Rule | Implementation |
-|------|---------------|
-| Never block `Dispatchers.Main` | All I/O (DICOM decode, HTTP, file write) on `Dispatchers.IO`. All CPU work (pixel windowing) on `Dispatchers.Default`. |
-| Minimize recomposition scope | Each UI section is in its own `@Composable` function. State is read at the lowest possible level. |
-| Stable types for Canvas | `@Immutable` on `SliceAnnotation` and `DicomSeries`. Kotlin compiler will skip recomposition if reference equals. |
-| Cache DICOM bitmaps | LRU cache. Never decode the same slice twice. |
-| Pre-fetch adjacent slices | `LaunchedEffect` pre-decodes ±2 slices when user is on slice N. |
-| Hardware-accelerated Canvas | Use `drawImage(bitmap)` inside `Canvas {}` — Skia GPU backend. Never convert to `BufferedImage` inside the UI layer. |
-| Avoid allocation in draw loop | No `List` or `Pair` creation inside `drawContent { }`. Pre-compute polyline point arrays before draw. |
-| Window is `singleInstance` | One window, one process. Avoid multiple Compose windows. |
-
-### 8.2 Memory Management
-
-- DICOM volumes can be 512×512×300 slices = 75 million pixels. **Never** load the full 3D volume
-  into RAM in the Kotlin layer. Load one slice at a time on demand.
-- The LRU cache limit of 128 bitmaps (~128 MB) is a soft ceiling. Expose a config key
-  `MAX_CACHED_SLICES` in `AppConfig`.
-- When the user changes axis, flush the cache for the previous axis to free memory.
-
-### 8.3 Coroutine Scopes
-
-| Scope | Used for |
-|-------|---------|
-| `viewModelScope` | All ViewModel-initiated operations (pipeline status polling, backend spawn) |
-| `rememberCoroutineScope()` | Composable-local operations (file picker dialog) |
-| Dedicated `CoroutineScope(SupervisorJob() + Dispatchers.IO)` | PythonProcessManager — survives ViewModel recreation |
-
----
-
-## 9. KMP Desktop Best Practices
-
-### 9.1 `expect`/`actual` for Platform Specifics
-Place in `:core`:
-```kotlin
-expect fun openFilePicker(title: String, allowedExtensions: List<String>): String?
-expect fun revealInFileBrowser(path: String)
-expect fun getAppDataDirectory(): String
-```
-
-Implement in `:desktop` using JVM `JFileChooser` / `Desktop.getDesktop()` / system property.
-
-### 9.2 Resource Loading
-Put all assets (icons, fonts) under `composeApp/src/jvmMain/composeResources/`. Access with
-`painterResource(Res.drawable.xxx)`.
-
-### 9.3 Window Configuration
-```kotlin
-application {
-    Window(
-        onCloseRequest = {
-            pythonProcessManager.stop()
-            exitApplication()
-        },
-        title = "SAM3D",
-        state = rememberWindowState(width = 1280.dp, height = 800.dp),
-        resizable = true,
-        undecorated = false
-    ) {
-        App(viewModel = wizardViewModel)
+fun normaliseVolume(rawPixels: FloatArray): ByteArray {
+    val min = rawPixels.min()
+    val max = rawPixels.max()
+    val range = (max - min).coerceAtLeast(1f)
+    return ByteArray(rawPixels.size) { i ->
+        ((rawPixels[i] - min) / range * 255f).toInt().coerceIn(0, 255).toByte()
     }
 }
 ```
 
-### 9.4 Theme
-Use Material 3 (`MaterialTheme`). Define a custom `ColorScheme` suited to a medical application:
-dark, high-contrast, with a neutral gray base. Avoid overly colorful primary palettes that would
-feel out of place in a clinical context. Full styling is deferred to a future iteration — for now
-use Material 3 defaults.
+> **v2 note:** This intentionally discards Hounsfield units. `RescaleSlope` / `RescaleIntercept`
+> and HU-windowing will be added in v2 when the pipeline migrates to proper HU normalisation
+> on the Python side.
+
+**`padtocube` implementation (matches `utils.py:41-51`):**
+```kotlin
+fun padToCube(volume: Array3D<Byte>): Array3D<Byte> {
+    val s = maxOf(volume.dimH, volume.dimW, volume.dimN)
+    // symmetric zero-padding on each axis
+    ...
+}
+```
+
+**Bitmap caching:**
+- Key: `Pair(axis, sliceIndex)`.
+- Max size: `AppConfig.MAX_CACHED_SLICES` (default 256; the full cube is in memory as `ByteArray`,
+  so caching decoded `ImageBitmap`s avoids repeated pixel-format conversion).
+- Use `LinkedHashMap` with `accessOrder = true` for LRU eviction.
+- Pre-fetch: `LaunchedEffect(sliceIndex)` triggers decoding of ±3 slices in the background.
+
+**Compressed DICOM note:** dcm4che handles common uncompressed transfer syntaxes automatically.
+JPEG2000-compressed DICOMs require `dcm4che-imageio` + a JPEG2000 ImageIO plugin on the
+classpath. v1 targets uncompressed DICOMs (which covers the `00000304_points` test data).
+Add a runtime check and a clear error message if an unsupported transfer syntax is encountered.
+
+### 6.4 OS-specific utilities (jvmMain)
+
+```kotlin
+object OsUtils {
+    fun revealInFileBrowser(path: Path) = when {
+        isMac()     -> Runtime.getRuntime().exec(arrayOf("open", "-R", path.toString()))
+        isWindows() -> Runtime.getRuntime().exec(arrayOf("explorer", "/select,${path}"))
+        else        -> Runtime.getRuntime().exec(arrayOf("xdg-open", path.parent.toString()))
+    }
+
+    fun userDataDir(): Path = when {
+        isMac()     -> Path(System.getProperty("user.home"), "Library", "Application Support", "SAM3D")
+        isWindows() -> Path(System.getenv("APPDATA"), "SAM3D")
+        else        -> Path(System.getenv("XDG_CONFIG_HOME")
+                            ?: "${System.getProperty("user.home")}/.config", "sam3d")
+    }
+}
+```
+
+### 6.5 WizardViewModel (commonMain)
+
+```kotlin
+data class WizardState(
+    val currentStep: WizardStep = WizardStep.START,
+    val sam3dGcodeDir: String? = null,
+    val dicomFolderPath: String? = null,
+    val outputFolderPath: String? = null,
+    val dicomSeries: DicomSeries? = null,
+    val annotations: List<SliceAnnotation> = emptyList(),
+    val pythonStatus: PythonStatus = PythonStatus.UNCHECKED,
+    val checkpointExists: Boolean = false,
+    val pipelineProgress: PipelineProgress? = null,
+    val outputGcodePath: String? = null,
+    val error: PipelineError? = null
+)
+
+sealed class PipelineError {
+    data class Network(val cause: Throwable) : PipelineError()
+    data class Server(val code: Int, val body: String) : PipelineError()
+    data class Parse(val cause: Throwable) : PipelineError()
+    object Cancelled : PipelineError()
+    data class Unknown(val cause: Throwable) : PipelineError()
+}
+
+enum class PythonStatus { UNCHECKED, CHECKING, VERIFIED, ERROR }
+enum class WizardStep { START, PROMPTING, PROCESSING, DONE }
+```
+
+```kotlin
+sealed class WizardIntent {
+    data class SetSam3dGcodeDir(val path: String) : WizardIntent()
+    data class SetDicomFolder(val path: String) : WizardIntent()
+    data class SetOutputFolder(val path: String) : WizardIntent()
+    object DownloadCheckpoint : WizardIntent()
+    object ProceedToPrompting : WizardIntent()
+    data class AddPolylinePoint(
+        val axis: Axis, val sliceIndex: Int, val x: Int, val y: Int, val mode: DrawingMode
+    ) : WizardIntent()
+    object EndPolyline : WizardIntent()
+    data class ClearSlice(val axis: Axis, val sliceIndex: Int) : WizardIntent()
+    object RunPipeline : WizardIntent()   // Step 2 → 3: writes points.json, spawns process
+    object CancelPipeline : WizardIntent()
+    object StartOver : WizardIntent()
+}
+```
+
+The ViewModel exposes `StateFlow<WizardState>` and a `fun handle(intent: WizardIntent)` entry
+point.  This is the **MVI** pattern — unidirectional data flow, no two-way bindings.
+
+**Back-navigation rules (enforced in `WizardViewModel`):**
+
+| From step | To step | Allowed? | Side effect |
+|-----------|---------|---------|------------|
+| PROMPTING | START | Yes | Clears `dicomSeries` if different folder selected |
+| PROCESSING | PROMPTING | No | `WizardIntent.CancelPipeline` instead |
+| DONE | PROMPTING | No | Use `StartOver` |
+| DONE | START | Yes (via StartOver) | Full state reset |
 
 ---
 
-## 10. Build & Packaging
+## 7. Python CLI Invocation Contract
 
-### 10.1 `build.gradle.kts` (`:desktop` module additions)
+This replaces the Flask endpoint table from v1. These are the requirements the Kotlin app imposes
+on the CLI invocation of `sam3d.py`.
+
+### 7.1 Working directory
+
+**Must be `<sam3dGcodeDir>/`** — the root of the SAM3D-GCODE repo.  `sam3d.py` uses relative
+paths for `tempdir`, `checkpoints/`, and `outputs/`.  Setting the wrong working directory is the
+single most common deployment error.
+
+### 7.2 Command
+
+```bash
+<pythonExe> sam3d.py \
+  --reslice 0 \
+  --reprompt 0 \
+  -p <absolute-path-to-dicom-folder> \
+  -o <absolute-path-to-output-dir> \
+  -r ico \
+  -s 120 \
+  -v 1 \
+  --checkpoint checkpoints/sam_vit_h_4b8939.pth \
+  --datatype dcm
+```
+
+| Flag | Value | Why |
+|------|-------|-----|
+| `--reslice 0` | skip | Kotlin already created and wrote `tempdir/points.json`; passing `1` would wipe it |
+| `--reprompt 0` | skip | Kotlin performed the annotation; passing `1` would launch the Tk GUI |
+| `-r ico` | icosahedron rotations | 12 projection angles; good quality / speed trade-off |
+| `-s 120` | 120 slices | Matches `sam3d.py` default; provides good coverage |
+
+### 7.3 Tempdir contract
+
+- Kotlin **creates** `<sam3dGcodeDir>/tempdir/` at the start of each run (deleting any existing
+  tempdir first).
+- Kotlin **writes** `tempdir/points.json` before invoking the subprocess.
+- `sam3d.py` with `--reslice 0` will **not wipe** the tempdir; it will add `slice_NN.png` files
+  alongside `points.json` (the rotated slice views used internally).
+- Kotlin **deletes** the entire tempdir on `StartOver` or after a cancelled run.
+
+### 7.4 Expected stdout structure
+
+Run `python sam3d.py <args> 2>&1 | tee dry_run.log` on the test data once.  Annotate the log
+file to identify stage-transition markers.  Commit the annotated log as
+`composeApp/src/jvmTest/resources/fixtures/dry_run_annotated.log`.
+
+Known markers (verify on first dry run):
+
+| stdout line contains | Stage |
+|---------------------|-------|
+| `"image loaded"` | Inference about to start |
+| `"Making prompt slices"` (tqdm header) | Preparing rotated views |
+| `"point cloud"` / `"pointcloud"` | Building point cloud |
+| `".gcode"` in output line | G-code written |
+
+### 7.5 Exit codes
+
+| Code | Meaning | UI action |
+|------|---------|-----------|
+| 0 | Success | Transition to Done screen, show output path |
+| 1 | Python exception | Show error dialog with last 20 log lines |
+| −1 / SIGTERM | Cancelled by user | Already handled by `CancelPipeline` intent |
+
+The output `.gcode` path is determined by watching stdout for a line that contains `.gcode`.  If
+not found, scan `<outputDir>` for the most recently modified `.gcode` file after subprocess exit.
+
+---
+
+## 8. Coordinate Frames
+
+This section is mandatory reading before implementing `SaveAnnotationsUseCase` or `DicomCanvas`.
+Getting the coordinate transform wrong produces silent inference failures.
+
+### 8.1 The three frames
+
+| Frame | Description | Range |
+|-------|-------------|-------|
+| **Display pixels** | The rendered canvas in dp (Compose) | `0..canvasWidth`, `0..canvasHeight` |
+| **Display rect** | Letterboxed area inside the canvas (preserves aspect ratio) | Subset of display pixels |
+| **Cube voxels** | Position in the `S×S×S` padded cube | `0..S-1` on each axis |
+
+```
+Display pixels
+      │  letterbox transform (preserve aspect ratio, centre image)
+      ▼
+Display rect   ←─── this is what the bitmap occupies
+      │  scale: displayRect.width / S  (for axis-2 slice)
+      ▼
+Cube voxels (x, y)  ←─── stored in points.json + slice index embedded for z
+```
+
+### 8.2 Letterbox transform
+
+The `DicomCanvas` renders the `S×S` bitmap centred inside a `canvasWidth × canvasHeight` area:
 
 ```kotlin
+val scale = minOf(canvasWidth / S.toFloat(), canvasHeight / S.toFloat())
+val displayW = S * scale
+val displayH = S * scale
+val offsetX = (canvasWidth - displayW) / 2f
+val offsetY = (canvasHeight - displayH) / 2f
+// DisplayRect: (offsetX, offsetY, displayW, displayH)
+```
+
+### 8.3 Pointer → cube voxel conversion (per axis)
+
+```kotlin
+fun displayToVoxel(
+    pointerX: Float, pointerY: Float,
+    displayRect: Rect,
+    cubeSize: Int,
+    axis: Axis,
+    sliceIndex: Int
+): IntArray {
+    val voxelX = ((pointerX - displayRect.left) / displayRect.width * cubeSize)
+                   .toInt().coerceIn(0, cubeSize - 1)
+    val voxelY = ((pointerY - displayRect.top)  / displayRect.height * cubeSize)
+                   .toInt().coerceIn(0, cubeSize - 1)
+    return when (axis) {
+        Axis.AXIS_0 -> intArrayOf(sliceIndex, voxelX, voxelY)
+        Axis.AXIS_1 -> intArrayOf(voxelX, sliceIndex, voxelY)
+        Axis.AXIS_2 -> intArrayOf(voxelX, voxelY, sliceIndex)
+    }
+}
+```
+
+### 8.4 Worked example
+
+Assume the DICOM series is 512 × 512 pixels × 300 slices.
+- `rawShape = (512, 512, 300)` → `cubeSize S = 512` (largest dim).
+- Padding adds (0, 0, 106) voxels symmetrically on the Z axis.
+- Canvas is 800 × 600 dp; `scale = min(800/512, 600/512) = 1.1718…`; `displayW = displayH = 512 × 1.1718 = 600`; `offsetX = 100`, `offsetY = 0`.
+- User taps at display pixel `(250, 180)` on Axis 2 (axial), slice 45.
+- `voxelX = (250 − 100) / 600 × 512 = 128`, `voxelY = (180 − 0) / 600 × 512 = 153`.
+- Point stored: `[128, 153, 45]`.
+
+`scale_transform.parse_prompts` then adds `padding_constant = int((√3 − 1)/2 × 512/2) ≈ 93` to
+each coordinate before further processing.  **Kotlin does not apply this addition** — it is
+Python's responsibility.
+
+### 8.5 Rendering voxel coords back onto canvas
+
+```kotlin
+fun voxelToDisplay(point: IntArray, axis: Axis, sliceIndex: Int, displayRect: Rect, cubeSize: Int): Offset? {
+    val (vx, vy) = when (axis) {
+        Axis.AXIS_0 -> if (point[0] != sliceIndex) return null else Pair(point[1], point[2])
+        Axis.AXIS_1 -> if (point[1] != sliceIndex) return null else Pair(point[0], point[2])
+        Axis.AXIS_2 -> if (point[2] != sliceIndex) return null else Pair(point[0], point[1])
+    }
+    return Offset(
+        displayRect.left + vx.toFloat() / cubeSize * displayRect.width,
+        displayRect.top  + vy.toFloat() / cubeSize * displayRect.height
+    )
+}
+```
+
+---
+
+## 9. Annotation JSON Format
+
+### 9.1 Schema (canonical)
+
+A single file: `<sam3dGcodeDir>/tempdir/points.json`
+
+```json
+{
+  "positive": [
+    [[x0, y0, z0], [x1, y1, z1], ...],
+    [[x0, y0, z0], ...]
+  ],
+  "negative": [
+    [[x0, y0, z0], ...]
+  ]
+}
+```
+
+- Top-level keys: **`"positive"`** and **`"negative"`** (not `"pos"`/`"neg"`).
+- Each key maps to a list of polylines.
+- Each polyline is a list of points.
+- Each point is `[x, y, z]` — all three coordinates in **padded-cube voxel space** — with the
+  slice index embedded at the active-axis position (see §8.3).
+- Points from all axes and all slices are merged into the two top-level lists.
+
+### 9.2 Kotlin data class
+
+```kotlin
+// in commonMain/domain/model/
+@Serializable
+data class AnnotationFile(
+    val positive: List<List<List<Int>>>,
+    val negative: List<List<List<Int>>>
+)
+```
+
+`SaveAnnotationsUseCase` converts `List<SliceAnnotation>` → `AnnotationFile` → JSON string →
+file write (on `Dispatchers.IO`).
+
+### 9.3 Fixture
+
+A known-good `points.json` from a real run of the Tk annotation tool (`reprompting3d.py`) must
+be committed to:
+```
+composeApp/src/jvmTest/resources/fixtures/points.fixture.json
+```
+alongside a comment-file documenting the cube size and DICOM series used to generate it.
+
+**Integration test requirement:** `SaveAnnotationsUseCaseTest` must assert that serialising a
+hand-crafted `List<SliceAnnotation>` produces byte-identical output to the corresponding
+fixture rows.  This test catches any key-name or structure drift before runtime.
+
+### 9.4 Verification checklist (before Phase 4)
+
+Read these files in the SAM3D-GCODE repo; do not guess:
+- `reprompting3d.py` → `save_points()` (actual file write).
+- `scale_transform.py` → `parse_prompts()` (actual file read).
+- `sam3d.py:101` → call site.
+
+Confirm: file name, directory, key names, coordinate order, integer vs float types.
+
+---
+
+## 10. Performance Guidelines
+
+### 10.1 Compose Desktop rules
+
+| Rule | Implementation |
+|------|---------------|
+| Never block `Dispatchers.Main` | DICOM decode, file I/O, subprocess on `Dispatchers.IO`. CPU-bound pixel ops on `Dispatchers.Default`. |
+| Minimise recomposition scope | Each UI section in its own `@Composable`. State read at the lowest possible level. |
+| Stable types for Canvas | `@Immutable` on `SliceAnnotation` and `DicomSeries`. |
+| Cache DICOM bitmaps | LRU cache. Never decode the same slice twice. |
+| Pre-fetch adjacent slices | `LaunchedEffect` pre-decodes ±3 slices when user is on slice N. |
+| Hardware-accelerated Canvas | `drawImage(bitmap)` inside `Canvas {}` — Skia GPU. |
+| Avoid allocation in draw loop | Pre-compute polyline `FloatArray`s before entering `drawContent {}`. |
+
+### 10.2 Memory management
+
+- The **padded cube** (`S×S×S × 1 byte`) is held in memory as a `ByteArray` for the duration
+  of the Prompting step. For S = 512: 128 MB. For S = 768 (large CT): 432 MB — approaching the
+  JVM heap configured in `gradle.properties` (`-Xmx3072M`). Monitor via Task Manager / Activity
+  Monitor during testing; increase `Xmx` if needed.
+- The `ByteArray` cube is freed (GC-eligible) once the user proceeds to the Processing step.
+- `ImageBitmap` LRU cache: `AppConfig.MAX_CACHED_BITMAPS = 256` (256 × 512×512×4 bytes ≈ 256 MB).
+  Adjust based on available RAM during QA.
+- Axis switching does **not** flush the bitmap cache (the cube stays the same; only the slice
+  dimension changes).
+
+### 10.3 Coroutine scopes
+
+| Scope | Used for |
+|-------|---------|
+| `viewModelScope` | All ViewModel-initiated work (DICOM load, annotation save, subprocess lifecycle, progress collection) |
+| `rememberCoroutineScope()` | Composable-local operations (file picker dialog) |
+| Singleton `CoroutineScope(SupervisorJob() + Dispatchers.IO)` | `PythonProcessManager` — survives ViewModel recreation |
+
+---
+
+## 11. Build & Packaging
+
+### 11.1 `libs.versions.toml` additions
+
+```toml
+[versions]
+# (existing)
+androidx-lifecycle      = "2.10.0"
+composeMultiplatform    = "1.10.3"
+kotlin                  = "2.3.20"
+kotlinx-coroutines      = "1.10.2"
+material3               = "1.10.0-alpha05"
+# (new)
+dcm4che                 = "5.31.0"
+kotlinx-serialization   = "1.8.0"   # verify latest at build start
+slf4j                   = "2.0.13"
+junit                   = "4.13.2"
+turbine                 = "1.2.0"   # Flow testing
+mockk                   = "1.13.12"
+
+[libraries]
+# (existing…)
+# (new)
+dcm4che-core            = { module = "org.dcm4che:dcm4che-core",     version.ref = "dcm4che" }
+dcm4che-imageio         = { module = "org.dcm4che:dcm4che-imageio",  version.ref = "dcm4che" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+slf4j-api               = { module = "org.slf4j:slf4j-api",          version.ref = "slf4j" }
+slf4j-simple            = { module = "org.slf4j:slf4j-simple",       version.ref = "slf4j" }
+turbine                 = { module = "app.cash.turbine:turbine",      version.ref = "turbine" }
+mockk                   = { module = "io.mockk:mockk",                version.ref = "mockk" }
+kotlin-test-junit       = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+
+[plugins]
+# (existing…)
+kotlinSerialization     = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+```
+
+### 11.2 `composeApp/build.gradle.kts`
+
+```kotlin
+plugins {
+    alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.composeMultiplatform)
+    alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.composeHotReload)
+    alias(libs.plugins.kotlinSerialization)   // ← new
+}
+
 kotlin {
     jvm()
     sourceSets {
+        commonMain.dependencies {
+            implementation(libs.compose.runtime)
+            implementation(libs.compose.foundation)
+            implementation(libs.compose.material3)
+            implementation(libs.compose.ui)
+            implementation(libs.compose.components.resources)
+            implementation(libs.compose.uiToolingPreview)
+            implementation(libs.androidx.lifecycle.viewmodelCompose)
+            implementation(libs.androidx.lifecycle.runtimeCompose)
+            implementation(libs.kotlinx.serialization.json)
+        }
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+            implementation(libs.turbine)
+        }
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
-            implementation("org.dcm4che:dcm4che-core:5.31.0")
-            implementation("org.dcm4che:dcm4che-imageio:5.31.0")
-            implementation("io.ktor:ktor-client-cio:2.3.x")
-            implementation("io.ktor:ktor-client-content-negotiation:2.3.x")
-            implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.x")
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.x")
-            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.x")
+            implementation(libs.kotlinx.coroutinesSwing)
+            implementation(libs.dcm4che.core)
+            implementation(libs.dcm4che.imageio)
+            implementation(libs.slf4j.api)
+            implementation(libs.slf4j.simple)
+        }
+        jvmTest.dependencies {
+            implementation(libs.kotlin.test.junit)
+            implementation(libs.mockk)
         }
     }
 }
 
 compose.desktop {
     application {
-        mainClass = "edu.upenn.sam3d.MainKt"
+        mainClass = "edu.upenn.sam3d.MainKt"   // lives in jvmMain/kotlin/edu/upenn/sam3d/main.kt
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "SAM3D"
             packageVersion = "1.0.0"
-            macOS { iconFile.set(project.file("src/jvmMain/resources/icon.icns")) }
-            windows { iconFile.set(project.file("src/jvmMain/resources/icon.ico")) }
+            macOS { iconFile.set(project.file("src/jvmMain/composeResources/drawable/icon.icns")) }
+            windows { iconFile.set(project.file("src/jvmMain/composeResources/drawable/icon.ico")) }
+            linux   { iconFile.set(project.file("src/jvmMain/composeResources/drawable/icon.png")) }
         }
-        // Include config.json in the distribution
-        fromFiles(project.fileTree("src/jvmMain/resources") { include("config.json") })
+        // Bundle a default config template; NOT user config (user config lives in userDataDir)
+        fromFiles(project.fileTree("src/jvmMain/resources") { include("config.default.json") })
     }
 }
 ```
 
-### 10.2 What NOT to Bundle
-The Python backend is **not** bundled in the Kotlin distribution. The app discovers Python via
-config. This is intentional — the Python environment (conda, 2.5 GB SAM checkpoint) is too large
-to bundle and is already set up by the user.
+### 11.3 User config vs bundled template
+
+- **Bundled** (`src/jvmMain/resources/config.default.json`): default values only — no paths.
+- **User config** (`<userDataDir>/SAM3D/config.json`): created on first launch by copying the
+  template; user edits it to set `pythonPath`, `sam3dGcodeDir`, `maxCachedBitmaps`.
+- `AppConfig` reads the user config at startup; falls back to defaults for any missing key.
+
+### 11.4 What NOT to bundle
+
+Python, conda environments, the SAM checkpoint (2.5 GB), and the SAM3D-GCODE repo are **not**
+bundled. The user configures these paths in `config.json`.
 
 ---
 
-## 11. Phased Implementation Order
+## 12. Phased Implementation Order
 
-Build in this exact order to ensure correctness and avoid integration surprises:
+### Phase 1 — Foundation
 
-### Phase 1 — Foundation (Do first, no UI yet)
-1. Set up `:core` and `:desktop` Gradle modules.
-2. Implement `WizardState`, `WizardIntent`, `WizardViewModel` with MVI skeleton.
-3. Implement `PythonProcessManager` — spawn, poll healthcheck, kill.
-4. Implement `PipelineApiClient` with Ktor — all endpoints (can hit the stub Flask backend).
-5. Write unit tests for `WizardViewModel` state transitions.
-6. **Validation:** launch app → Python spawns → `/healthcheck` returns OK → `BackendStatus.CONNECTED`.
+1. Update `libs.versions.toml` with all new dependencies; verify all artefacts resolve.
+2. Apply `kotlinSerialization` plugin.
+3. Implement `WizardState`, `WizardIntent`, `WizardViewModel` skeleton (MVI, no business logic).
+4. Implement `PythonProcessManager` — verify binary, parse stdout with a stub parser.
+5. Implement `StdoutProgressParser` — write unit tests against known log lines.
+6. Write unit tests for `WizardViewModel` state transitions (use `Turbine` for `StateFlow`).
+7. **Validation:** `WizardViewModel` transitions through `START → PROCESSING → DONE` with a mocked
+   `PythonProcessManager` that emits fake `PipelineProgress` events.
 
-### Phase 2 — DICOM Loading
-1. Add dcm4che dependency.
-2. Implement `Dcm4cheLoader.loadSeries()` (metadata only).
-3. Implement `Dcm4cheLoader.loadSliceBitmap()` with pixel windowing.
-4. Implement `DicomBitmapCache` (LRU).
-5. **Validation:** load the `00000304_points` DICOM series, render slice 0 to an `ImageBitmap`,
-   verify the bone is visible.
+### Phase 2 — DICOM Loading + Padded Cube
+
+1. Implement `Dcm4cheLoader.loadSeries()` — load, min-max normalise, `padToCube`, store `ByteArray`.
+2. Implement `Dcm4cheLoader.loadSliceBitmap()` — slice cube, convert to `ImageBitmap`.
+3. Implement `DicomBitmapCache`.
+4. Write unit test: load `00000304_points` DICOM series → assert `cubeSize = S`, render axial
+   slice 0, confirm non-zero pixels.
+5. **Validation:** Load the test series; render Axis 2 slice 150; bone structure visible.
 
 ### Phase 3 — Wizard Shell + Start Screen
+
 1. Build `WizardShell` (NavigationRail + content area).
-2. Build `StartScreen` with folder pickers and backend status badge.
-3. Wire `WizardViewModel` intents to the UI.
-4. **Validation:** full Start screen works, folder picker opens, backend status animates.
+2. Build `StartScreen` with folder pickers, SAM3D-GCODE dir picker, python verification row,
+   checkpoint status row.
+3. Wire `WizardViewModel` intents.
+4. **Validation:** All pickers open, python verified via `python --version`, checkpoint check works.
 
-### Phase 4 — Prompting Screen (Core UI)
-1. Build `DicomCanvas` composable with bitmap rendering.
-2. Build `AnnotationOverlay` with pointer input for polyline drawing.
-3. Build axis switcher, slice slider, mode toggle.
-4. Build `SaveAnnotationsUseCase` — writes JSON to `tempdir`.
-5. **Validation:** load DICOM, draw 3 positive polylines on slice 20, switch axis, draw on slice
-   10, click "Next" → verify JSON files written to `tempdir`.
+### Phase 4 — Prompting Screen
 
-### Phase 5 — Inference, PointCloud, GCode Screens
-1. Build `StageProgressBar` component.
-2. Build `InferenceScreen` with polling loop.
-3. Build `PointCloudScreen` (simpler — no interaction).
-4. Build `GCodeScreen` with output path display and reveal button.
-5. **Validation:** run full pipeline end-to-end (will be limited until Flask stubs are replaced with
-   real implementations by the Python team).
+1. Build `DicomCanvas` composable (bitmap rendering, letterbox, `awaitPointerEventScope` input).
+2. Build `AnnotationOverlay` (polyline rendering).
+3. Build axis switcher, slice slider.
+4. Implement keyboard shortcuts: `A` toggle ±, `W` new positive, `S` new negative, `D` delete
+   last, left/right arrow slice ±1, `0`/`1`/`2` axis switch.
+5. Build `SaveAnnotationsUseCase` — writes `points.json` per §9.
+6. Write integration test: annotate 2 slices programmatically → assert JSON output matches fixture.
+7. **Validation:** Load DICOM; draw 3 positive polylines on Axis 2 slice 20; switch to Axis 0;
+   draw 1 polyline on slice 10; click "Run Pipeline" → confirm `tempdir/points.json` written with
+   correct keys and coordinate values (check manually against §8.4 worked example).
 
-### Phase 6 — Polish Pass
-1. Error handling (network errors, DICOM parse errors, Python crash recovery).
-2. Keyboard shortcuts (scroll wheel on DICOM canvas, A/D to switch axis).
-3. Loading shimmer placeholder while DICOM slice is being decoded.
-4. Window size persistence in preferences.
+### Phase 5 — Processing Screens + End-to-End
+
+1. Build `ProcessingScreen` (shared composable for Steps 3-5, driven by `PipelineProgress` flow).
+2. Build `StageProgressBar` (determinate per-stage, indeterminate fallback).
+3. Build `DoneScreen` with `OsUtils.revealInFileBrowser`.
+4. Wire `PythonProcessManager.start()` to `WizardIntent.RunPipeline`.
+5. Do a dry run with real Python (`python sam3d.py ...`) and annotate `dry_run.log`.  Update
+   `AppConfig.ProgressMarkers` from annotations.  Commit the annotated log.
+6. **Validation:** Full end-to-end on `00000304_points` DICOM.  G-code file produced; "Reveal"
+   button opens Finder/Explorer at the output file.
+
+### Phase 6 — Polish
+
+1. Error handling: Python crash (non-zero exit) → show last 20 log lines in an error dialog.
+2. Loading shimmer while DICOM slice is decoded.
+3. Window size persistence in user config.
+4. Checkpoint download progress bar (`CheckpointDownloadBar`).
+5. `BackendStatusBadge` replaced by a "Python ready" static indicator on the Start screen.
+6. macOS notarization + codesigning notes (defer to release prep checklist).
+7. CI skeleton: GitHub Actions matrix (macOS/Windows/Linux) that builds a distribution on tag.
+
+### Phase 7 (post-v1) — Persistent Session / Crash Recovery
+
+- Save annotations to a draft in `<userDataDir>/SAM3D/sessions/<timestamp>/` on every "Next"
+  click.  On startup, if an incomplete session exists, offer to resume.
 
 ---
 
-## 12. Directory Structure (Final Target)
+## 13. Directory Structure (target)
 
 ```
 sam3d/
-├── core/
+├── composeApp/
+│   ├── build.gradle.kts
 │   └── src/
-│       └── commonMain/kotlin/edu/upenn/sam3d/core/
-│           ├── domain/
-│           │   ├── model/
-│           │   │   ├── DicomSeries.kt
-│           │   │   ├── SliceAnnotation.kt
-│           │   │   ├── PipelineStatus.kt
-│           │   │   └── WizardStep.kt
-│           │   ├── repository/
-│           │   │   ├── DicomRepository.kt      (interface)
-│           │   │   └── PipelineRepository.kt   (interface)
-│           │   └── usecase/
-│           │       ├── LoadDicomUseCase.kt
-│           │       └── SaveAnnotationsUseCase.kt
-│           ├── api/
-│           │   ├── PipelineApiClient.kt        (interface + Ktor impl)
-│           │   └── dto/
-│           │       ├── PromptRequest.kt
-│           │       ├── InferenceConfig.kt
-│           │       ├── PointCloudConfig.kt
-│           │       └── PipelineStatusResponse.kt
-│           └── state/
-│               ├── WizardState.kt
-│               ├── WizardIntent.kt
-│               └── WizardViewModel.kt
+│       ├── commonMain/kotlin/edu/upenn/sam3d/
+│       │   ├── domain/
+│       │   │   ├── model/
+│       │   │   │   ├── DicomSeries.kt
+│       │   │   │   ├── SliceAnnotation.kt
+│       │   │   │   ├── AnnotationFile.kt        ← @Serializable, matches points.json
+│       │   │   │   ├── PipelineProgress.kt
+│       │   │   │   ├── PipelineStage.kt
+│       │   │   │   ├── WizardStep.kt
+│       │   │   │   └── Axis.kt
+│       │   │   ├── repository/
+│       │   │   │   └── DicomRepository.kt       ← interface
+│       │   │   └── usecase/
+│       │   │       ├── LoadDicomUseCase.kt
+│       │   │       └── SaveAnnotationsUseCase.kt
+│       │   └── state/
+│       │       ├── WizardState.kt
+│       │       ├── WizardIntent.kt
+│       │       └── WizardViewModel.kt
+│       │
+│       ├── jvmMain/
+│       │   ├── kotlin/edu/upenn/sam3d/
+│       │   │   ├── main.kt
+│       │   │   ├── AppConfig.kt
+│       │   │   ├── OsUtils.kt
+│       │   │   ├── dicom/
+│       │   │   │   ├── Dcm4cheLoader.kt
+│       │   │   │   └── DicomBitmapCache.kt
+│       │   │   ├── process/
+│       │   │   │   ├── PythonProcessManager.kt
+│       │   │   │   └── StdoutProgressParser.kt
+│       │   │   └── ui/
+│       │   │       ├── App.kt
+│       │   │       ├── theme/AppTheme.kt
+│       │   │       ├── wizard/
+│       │   │       │   ├── WizardShell.kt
+│       │   │       │   ├── StartScreen.kt
+│       │   │       │   ├── PromptingScreen.kt
+│       │   │       │   ├── ProcessingScreen.kt
+│       │   │       │   └── DoneScreen.kt
+│       │   │       ├── canvas/
+│       │   │       │   ├── DicomCanvas.kt
+│       │   │       │   └── AnnotationOverlay.kt
+│       │   │       └── components/
+│       │   │           ├── StageProgressBar.kt
+│       │   │           ├── CheckpointDownloadBar.kt
+│       │   │           ├── FilePicker.kt
+│       │   │           └── WindowingControls.kt
+│       │   ├── composeResources/drawable/
+│       │   │   └── ic_sam3d.xml
+│       │   └── resources/
+│       │       └── config.default.json
+│       │
+│       └── jvmTest/
+│           ├── kotlin/edu/upenn/sam3d/
+│           │   ├── SaveAnnotationsUseCaseTest.kt
+│           │   ├── StdoutProgressParserTest.kt
+│           │   ├── Dcm4cheLoaderTest.kt
+│           │   └── WizardViewModelTest.kt
+│           └── resources/fixtures/
+│               ├── points.fixture.json          ← from a real reprompting3d.py run
+│               └── dry_run_annotated.log        ← sam3d.py stdout with stage annotations
 │
-├── desktop/
-│   └── src/
-│       └── jvmMain/
-│           ├── kotlin/edu/upenn/sam3d/desktop/
-│           │   ├── main.kt
-│           │   ├── AppConfig.kt
-│           │   ├── dicom/
-│           │   │   ├── Dcm4cheLoader.kt
-│           │   │   └── DicomBitmapCache.kt
-│           │   ├── process/
-│           │   │   └── PythonProcessManager.kt
-│           │   └── ui/
-│           │       ├── App.kt
-│           │       ├── theme/
-│           │       │   └── AppTheme.kt
-│           │       ├── wizard/
-│           │       │   ├── WizardShell.kt
-│           │       │   ├── StartScreen.kt
-│           │       │   ├── PromptingScreen.kt
-│           │       │   ├── InferenceScreen.kt
-│           │       │   ├── PointCloudScreen.kt
-│           │       │   └── GCodeScreen.kt
-│           │       ├── canvas/
-│           │       │   ├── DicomCanvas.kt
-│           │       │   └── AnnotationOverlay.kt
-│           │       └── components/
-│           │           ├── StageProgressBar.kt
-│           │           ├── BackendStatusBadge.kt
-│           │           ├── FilePicker.kt
-│           │           └── WindowingControls.kt
-│           └── composeResources/
-│               └── drawable/
-│                   └── ic_sam3d.xml
-│
-├── build.gradle.kts   (root)
+├── build.gradle.kts    (root)
 ├── settings.gradle.kts
-└── SAM3D_DESKTOP_PLAN.md   (this file)
+├── gradle/libs.versions.toml
+└── SAM3D_DESKTOP_PLAN.md
 ```
 
 ---
 
-## 13. Key Risks & Mitigations
+## 14. Key Risks & Mitigations
 
 | Risk | Mitigation |
 |------|-----------|
-| `reprompting3d.py` JSON format changes | Define a `@Serializable` `AnnotationFileFormat` data class in `:core`. A single change there updates all serialization. Add an integration test that compares serialized output to a fixture. |
-| Python process fails to start | 30-second timeout on healthcheck polling. If it fails, show a clear error dialog with the last 10 lines of the Python log file. |
-| Large DICOM series OOM | LRU cache with 128 bitmaps cap. `WeakReference`-backed secondary cache for rarely accessed slices. |
-| Flask stub endpoints → real endpoints have different schemas | All HTTP responses go through a single `PipelineApiClient` with typed DTOs. Schema mismatches fail fast at the DTO layer with a clear error. |
-| Compose Desktop hot-reload disrupts in-progress pipeline | Disable hot-reload in production build. Keep `composeHotReload` only in debug builds. |
-| macOS sandbox / Gatekeeper blocks spawned Python | Use `ProcessBuilder` with explicit absolute path to the conda env Python. Document that users may need to right-click to open on first launch. |
+| `points.json` schema drifts from Python | `AnnotationFile` is a single `@Serializable` data class. Integration test asserts byte-equality vs fixture. |
+| Progress markers change when Python team edits `sam3d.py` | Markers live in `AppConfig.ProgressMarkers` (one map to edit). Progress display breaks before correctness does; monitored by running the dry-run log test on each update. |
+| `sam3d.py` invoked with wrong working directory | `PythonProcessManager` asserts `workingDir.resolve("sam3d.py").exists()` before spawning. Surfaced as a setup error on the Start screen. |
+| SAM checkpoint missing | Start screen checks existence; offers download via `download_checkpoint.py` with a progress bar. |
+| Large DICOM OOM (cube > 2 GB) | `Dcm4cheLoader.loadSeries` checks `cubeSize^3 < AppConfig.MAX_CUBE_BYTES`; if exceeded, shows an error asking the user to contact support. Increase JVM `-Xmx` in `gradle.properties` if needed. |
+| Python process hangs forever | `PythonProcessManager.start()` sets a `withTimeout(AppConfig.PIPELINE_TIMEOUT_MS)`. On timeout, `cancel()` is called and the error screen is shown. |
+| macOS Gatekeeper blocks spawned Python | Use absolute path to the conda env binary. Document that users may need to allow it in System Settings → Privacy & Security on first launch. |
+| `xdg-open` fails on some Linux WMs | `OsUtils.revealInFileBrowser` falls back to opening the parent directory if the direct file reveal fails silently. |
+| SAM3D-GCODE Python stdout format changes | `StdoutProgressParser` is tested against the committed `dry_run_annotated.log`. A failing parser test is the signal to update markers. |
+
+**PHI note:** All DICOM processing is on-device. No patient data leaves the machine. The app
+does not transmit DICOMs or annotations to any network endpoint.
 
 ---
 
-## 14. Annotation JSON Format Research Note
+## 15. Back-Navigation Rules
 
-**Before implementing `SaveAnnotationsUseCase`, the developer MUST read:**
-- `SAM3D-GCODE/reprompting3d.py` — to see exactly what JSON structure it reads.
-- `SAM3D-GCODE/scale_transform.py` → `parse_prompts()` function — to understand how it traverses
-  the tempdir to find per-slice files.
-- `SAM3D-GCODE/prompting.py` → the `save_annotations()` or equivalent function — to see the
-  exact filename convention.
+| Current step | Trying to go to | Allowed | Mechanism |
+|-------------|----------------|---------|-----------|
+| PROMPTING | START | Yes | NavigationRail click; annotations preserved unless DICOM path changes |
+| PROCESSING | PROMPTING | **No** | Only `CancelPipeline` is offered (kills subprocess, resets to START) |
+| PROCESSING | START | **No** | Same — cancel first |
+| DONE | START | Yes | `StartOver` intent; full state reset + tempdir deletion |
+| DONE | PROMPTING | **No** | `StartOver` then re-annotate |
 
-Do NOT guess the format. The annotation step is the only place where the Kotlin app creates files
-that the Python pipeline directly reads. Getting this wrong means silent failure at inference time.
+Going from DONE back to START does **not** kill a subprocess (it has already exited). It cleans
+up tempdir and resets `WizardState` to initial values.
 
 ---
 
-## 15. Summary of All Architecture Decisions
+## 16. Summary of All Architecture Decisions
 
-| Decision | Choice |
-|----------|--------|
-| Integration strategy | HTTP/REST — Kotlin spawns Flask, calls endpoints |
-| Annotation canvas | Full Compose Canvas with native DICOM rendering + polyline overlay |
-| DICOM viewer layout | Single-pane with axis switcher + slice slider |
-| DICOM parsing library | dcm4che 5.x (JVM) |
-| Annotation handoff | Write JSON to disk → POST tempdir path to `/prompt` |
-| Pipeline parameters | Sensible defaults hidden from user (in `AppConfig`) |
-| Long-operation feedback | Stage-based determinate progress bar |
-| 3D point cloud viewer | Delegated to Python; no Kotlin 3D viewer |
-| Module structure | `:core` (KMP, no JVM APIs) + `:desktop` (JVM) from day 1 |
-| Python process | Spawned and owned by the Kotlin app; killed on exit via JVM shutdown hook |
-| State management | MVI — single `WizardViewModel` with `StateFlow<WizardState>` |
-| HTTP client | Ktor CIO (KMP-compatible) |
-| JSON | kotlinx.serialization |
-| Packaging | Compose Desktop `nativeDistributions` (no Python bundled) |
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Integration strategy | **CLI subprocess** (`sam3d.py` via `ProcessBuilder`) | Zero Python changes; aligns with the CLI-first design of the research pipeline |
+| Module structure | **Single `:composeApp`** with `commonMain`/`jvmMain` source sets | Ships desktop fast; bounded mobile refactor later |
+| Annotation handoff | Write `tempdir/points.json` directly; invoke subprocess with `--reprompt 0` | Bypasses the Tk GUI; no HTTP layer needed |
+| Progress tracking | Parse `sam3d.py` stdout / tqdm lines | No Python changes; markers decoupled into `AppConfig` |
+| Cancellation | `Process.destroyForcibly()` | Immediate; reliable; subprocess owns no persistent state |
+| Start Over | Kill subprocess (if any) → delete tempdir → reset `WizardState` | Clean slate; no stale Python state |
+| Pixel normalisation | Global min-max (matches `utils.load3dmatrix`) | User sees exactly what Python sees; HU-windowing → v2 |
+| Volume memory | Full padded cube (`S³` `ByteArray`) held during Prompting | Required for coronal/sagittal slicing; consistent with Python |
+| DICOM parsing library | dcm4che 5.31.0 (JVM) | Industry-standard; handles uncompressed transfer syntaxes |
+| Coordinate frame | Padded-cube voxel space; slice index at axis position | Matches `reprompting3d.py` convention exactly (§8) |
+| JSON schema | `{"positive": [...], "negative": [...]}` single file | Matches `scale_transform.parse_prompts` exactly (§9) |
+| State management | MVI — `WizardViewModel` + `StateFlow<WizardState>` | Unidirectional; testable; no two-way bindings |
+| JSON library | `kotlinx.serialization` | KMP-native; used only for `points.json` |
+| Packaging | `nativeDistributions` `.dmg`/`.msi`/`.deb` | No Python or Node bundled |
+| User config | Per-OS path (`~/Library/Application Support/SAM3D/` on mac) | OS-conventional; separate from bundled template |
+| Logging | `slf4j-simple` for Kotlin; Python stdout → log file | Lightweight; both sides debuggable post-crash |
+| Test stack | JUnit 4 + Turbine + MockK | Standard for KMP JVM targets |
