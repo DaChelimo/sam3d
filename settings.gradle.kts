@@ -25,6 +25,7 @@ dependencyResolutionManagement {
             }
         }
         mavenCentral()
+        maven("https://www.dcm4che.org/maven2/")
     }
 }
 
