@@ -1,36 +1,30 @@
 package edu.upenn.sam3d
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.safeContentPadding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import org.jetbrains.compose.resources.painterResource
-
-import sam3d.composeapp.generated.resources.Res
-import sam3d.composeapp.generated.resources.compose_multiplatform
+import edu.upenn.sam3d.domain.usecase.SaveAnnotationsUseCase
+import edu.upenn.sam3d.process.PythonPipelineRunner
+import edu.upenn.sam3d.state.WizardViewModel
+import edu.upenn.sam3d.ui.theme.AppTheme
+import edu.upenn.sam3d.ui.wizard.WizardShell
 
 @Composable
-@Preview
 fun App() {
-    MaterialTheme {
-        var showContent by remember { mutableStateOf(false) }
-        Column(
-            modifier = Modifier
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .safeContentPadding()
-                .fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+    // SaveAnnotationsUseCase writes tempdir/points.json; PythonPipelineRunner spawns sam3d.py and
+    // registers the live process with main.kt's shutdown hook (activeProcessManager).
+    val viewModel = remember {
+        val runner = PythonPipelineRunner(
+            logDir = OsUtils.userDataDir().resolve("logs"),
+            onManagerStarted = { activeProcessManager = it },
+        )
+        WizardViewModel(annotationSaver = SaveAnnotationsUseCase(), pipelineRunner = runner)
+    }
+    AppTheme {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            WizardShell(viewModel)
         }
     }
 }
