@@ -1,6 +1,7 @@
 package edu.upenn.sam3d
 
 import edu.upenn.sam3d.domain.model.PipelineStage
+import edu.upenn.sam3d.domain.model.UserConfig
 
 object AppConfig {
     const val MAX_CACHED_BITMAPS = 256
@@ -16,17 +17,18 @@ object AppConfig {
     }
 
     /**
-     * Local-dev prefill for the Start screen (the values this machine always uses). The Start
-     * screen seeds empty fields from these; they remain editable. PYTHON must be the `sam3d` conda
-     * env — base anaconda / `python3` lacks pydicom et al. and the pipeline fails to import.
-     * (v2: move these to the per-user config.json described in §11.3.)
+     * Per-user config (§11.3), loaded once from <userDataDir>/SAM3D/config.json (then the bundled
+     * config.default.json, then these fallbacks). Replaces the previously hardcoded DevDefaults so
+     * paths / the python env are edited in a file, not in source. The Start screen seeds empty
+     * fields from these.
      */
-    object DevDefaults {
-        const val SAM3D_GCODE_DIR = "/Users/DaChelimo/Documents/Research/SAM3D-GCODE"
-        const val DICOM_FOLDER = "/Users/DaChelimo/Documents/Research/Sample-Data/00000304"
-        const val OUTPUT_FOLDER = "/Users/DaChelimo/Documents/Research/OUTPUT"
-        const val PYTHON = "/opt/anaconda3/envs/sam3d/bin/python"
-    }
+    private val userConfig: UserConfig by lazy { ConfigLoader.load() }
+
+    val pythonPath: String get() = userConfig.pythonPath?.takeIf(String::isNotBlank) ?: "python3"
+    val sam3dGcodeDir: String? get() = userConfig.sam3dGcodeDir?.takeIf(String::isNotBlank)
+    val dicomFolderPath: String? get() = userConfig.dicomFolderPath?.takeIf(String::isNotBlank)
+    val outputFolderPath: String? get() = userConfig.outputFolderPath?.takeIf(String::isNotBlank)
+    val maxCachedBitmaps: Int get() = userConfig.maxCachedBitmaps ?: MAX_CACHED_BITMAPS
 
     /**
      * stdout substrings (lowercase) that flip the pipeline stage, in pipeline order. Centralised

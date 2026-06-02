@@ -29,12 +29,12 @@ private val SuccessGreen = Color(0xFF4CAF50.toInt())
 fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     val scope = rememberCoroutineScope()
 
-    // Pre-fill the local-dev paths + the sam3d-env python on first composition (editable).
+    // Pre-fill from per-user config (§11.3) on first composition; fields remain editable.
     LaunchedEffect(Unit) {
-        if (state.sam3dGcodeDir == null) onIntent(WizardIntent.SetSam3dGcodeDir(AppConfig.DevDefaults.SAM3D_GCODE_DIR))
-        if (state.dicomFolderPath == null) onIntent(WizardIntent.SetDicomFolder(AppConfig.DevDefaults.DICOM_FOLDER))
-        if (state.outputFolderPath == null) onIntent(WizardIntent.SetOutputFolder(AppConfig.DevDefaults.OUTPUT_FOLDER))
-        if (state.pythonPath == "python3") onIntent(WizardIntent.SetPythonPath(AppConfig.DevDefaults.PYTHON))
+        if (state.sam3dGcodeDir == null) AppConfig.sam3dGcodeDir?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }
+        if (state.dicomFolderPath == null) AppConfig.dicomFolderPath?.let { onIntent(WizardIntent.SetDicomFolder(it)) }
+        if (state.outputFolderPath == null) AppConfig.outputFolderPath?.let { onIntent(WizardIntent.SetOutputFolder(it)) }
+        if (state.pythonPath == "python3") onIntent(WizardIntent.SetPythonPath(AppConfig.pythonPath))
     }
 
     // Check checkpoint when SAM3D dir changes

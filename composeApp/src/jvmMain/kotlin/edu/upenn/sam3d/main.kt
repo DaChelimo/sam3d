@@ -12,17 +12,21 @@ import java.awt.Dimension
 @Volatile
 internal var activeProcessManager: PythonProcessManager? = null
 
-fun main() = application {
-    Runtime.getRuntime().addShutdownHook(Thread {
-        activeProcessManager?.cancel()
-    })
+fun main() {
+    // §11.3: seed <userDataDir>/SAM3D/config.json from the bundled template on first launch.
+    ConfigLoader.ensureUserConfig()
+    application {
+        Runtime.getRuntime().addShutdownHook(Thread {
+            activeProcessManager?.cancel()
+        })
 
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "SAM3D",
-        state = rememberWindowState(width = 1280.dp, height = 800.dp),
-    ) {
-        window.minimumSize = Dimension(960, 600)
-        App()
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "SAM3D",
+            state = rememberWindowState(width = 1280.dp, height = 800.dp),
+        ) {
+            window.minimumSize = Dimension(960, 600)
+            App()
+        }
     }
 }
