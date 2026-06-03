@@ -73,10 +73,12 @@ fun voxelToDisplay(
     displayRect: Rect,
     cubeSize: Int,
 ): Offset? {
+    // Inverse of embedVoxel: recover (screen-x = voxelX, screen-y = voxelY) from the cube index.
+    // AXIS_2 stores [voxelY, voxelX, slice] (see embedVoxel), so screen-x = point[1], screen-y = point[0].
     val (vx, vy) = when (axis) {
         Axis.AXIS_0 -> if (point[0] != sliceIndex) return null else point[1] to point[2]
         Axis.AXIS_1 -> if (point[1] != sliceIndex) return null else point[0] to point[2]
-        Axis.AXIS_2 -> if (point[2] != sliceIndex) return null else point[0] to point[1]
+        Axis.AXIS_2 -> if (point[2] != sliceIndex) return null else point[1] to point[0]
     }
     return Offset(
         displayRect.left + vx.toFloat() / cubeSize * displayRect.width,

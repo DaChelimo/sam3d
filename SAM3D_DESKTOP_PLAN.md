@@ -752,10 +752,27 @@ fun displayToVoxel(
     return when (axis) {
         Axis.AXIS_0 -> intArrayOf(sliceIndex, voxelX, voxelY)
         Axis.AXIS_1 -> intArrayOf(voxelX, sliceIndex, voxelY)
-        Axis.AXIS_2 -> intArrayOf(voxelX, voxelY, sliceIndex)
+        Axis.AXIS_2 -> intArrayOf(voxelY, voxelX, sliceIndex)   // voxelY first — see note below
     }
 }
 ```
+
+**The stored point is the cube ARRAY INDEX `[d0, d1, d2]` of the clicked voxel.**
+`scale_transform.parse_prompts` consumes the point positionally (`cube[d0][d1][d2]`) with **no**
+axis-specific handling, so the order must be the array index of exactly the voxel under the cursor.
+The per-axis order is dictated by `Dcm4cheLoader.loadSliceBitmap`'s on-screen orientation:
+
+| Axis | Fixed dim | screen-x → | screen-y → | Stored `[d0,d1,d2]` |
+|------|-----------|------------|------------|---------------------|
+| AXIS_0 | H (dim0) | w (dim1) | n (dim2) | `[slice, voxelX, voxelY]` |
+| AXIS_1 | W (dim1) | h (dim0) | n (dim2) | `[voxelX, slice, voxelY]` |
+| AXIS_2 | N (dim2) | w (dim1) | h (dim0) | `[voxelY, voxelX, slice]` |
+
+> **AXIS_2 swaps voxelX/voxelY** because its bitmap shows screen-x = w (dim1) and screen-y = h
+> (dim0). Storing `[voxelX, voxelY, slice]` there transposes the prompt across the cube diagonal,
+> so the engine segments the *mirrored* location. This matches the engine's own `reprompting3d.py`
+> `add_point` (which stores `(voxelY, voxelX, slice)` for axis 2) and was confirmed end-to-end with
+> the SAM pipeline on a real asymmetric mark — see `docs/axis2_verification/`.
 
 ### 8.4 Worked example
 
@@ -765,7 +782,8 @@ Assume the DICOM series is 512 × 512 pixels × 300 slices.
 - Canvas is 800 × 600 dp; `scale = min(800/512, 600/512) = 1.1718…`; `displayW = displayH = 512 × 1.1718 = 600`; `offsetX = 100`, `offsetY = 0`.
 - User taps at display pixel `(250, 180)` on Axis 2 (axial), slice 45.
 - `voxelX = (250 − 100) / 600 × 512 = 128`, `voxelY = (180 − 0) / 600 × 512 = 153`.
-- Point stored: `[128, 153, 45]`.
+- Point stored: `[153, 128, 45]` — i.e. `[voxelY, voxelX, slice]` (the cube array index of the
+  clicked voxel; see the AXIS_2 note in §8.3). Storing `[128, 153, 45]` would transpose the prompt.
 
 `scale_transform.parse_prompts` then adds `padding_constant = int((√3 − 1)/2 × 512/2) ≈ 93` to
 each coordinate before further processing.  **Kotlin does not apply this addition** — it is
@@ -775,10 +793,11 @@ Python's responsibility.
 
 ```kotlin
 fun voxelToDisplay(point: IntArray, axis: Axis, sliceIndex: Int, displayRect: Rect, cubeSize: Int): Offset? {
+    // Inverse of §8.3: recover (vx = voxelX = screen-x, vy = voxelY = screen-y) from the cube index.
     val (vx, vy) = when (axis) {
         Axis.AXIS_0 -> if (point[0] != sliceIndex) return null else Pair(point[1], point[2])
         Axis.AXIS_1 -> if (point[1] != sliceIndex) return null else Pair(point[0], point[2])
-        Axis.AXIS_2 -> if (point[2] != sliceIndex) return null else Pair(point[0], point[1])
+        Axis.AXIS_2 -> if (point[2] != sliceIndex) return null else Pair(point[1], point[0])
     }
     return Offset(
         displayRect.left + vx.toFloat() / cubeSize * displayRect.width,

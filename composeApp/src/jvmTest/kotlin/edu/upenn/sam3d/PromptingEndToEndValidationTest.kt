@@ -34,7 +34,7 @@ class PromptingEndToEndValidationTest {
 
     @Test
     fun `three annotated slices produce a valid points json`() = runBlocking {
-        // Slice 45 on AXIS_2 — two clicks (the first is the §8.4 example → [128,153,45]).
+        // Slice 45 on AXIS_2 — two clicks (the first is the §8.4 example → [153,128,45]).
         val axis2slice45 = SliceAnnotation(
             axis = Axis.AXIS_2, sliceIndex = 45,
             positivePolylines = listOf(

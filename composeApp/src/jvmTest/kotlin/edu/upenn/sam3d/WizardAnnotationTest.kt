@@ -26,7 +26,9 @@ class WizardAnnotationTest {
         val vm = WizardViewModel()
         vm.handle(WizardIntent.AddPolylinePoint(Axis.AXIS_2, sliceIndex = 45, x = 10, y = 20, mode = DrawingMode.POSITIVE))
         val point = vm.state.value.annotations.single().positivePolylines.single().single()
-        assertContentEquals(intArrayOf(10, 20, 45), point)
+        // AXIS_2 stores the cube array index [voxelY, voxelX, slice] = [20, 10, 45] (slice at [2]) to
+        // match the engine; storing [voxelX, voxelY, slice] there would transpose the prompt (§8.3).
+        assertContentEquals(intArrayOf(20, 10, 45), point)
     }
 
     @Test
