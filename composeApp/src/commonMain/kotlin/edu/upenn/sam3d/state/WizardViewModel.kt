@@ -49,7 +49,15 @@ class WizardViewModel(
                             it.copy(currentStep = WizardStep.DONE, outputGcodePath = progress.outputPath)
                         }
                         PipelineStage.ERROR -> _state.update {
-                            it.copy(error = PipelineError.Server(code = 1, body = runner.recentOutput()))
+                            val out = runner.recentOutput()
+                            it.copy(
+                                error = PipelineError.Server(
+                                    code = 1,
+                                    body = out,
+                                    logPath = runner.logPath(),
+                                    hint = FailureHints.classify(out),
+                                )
+                            )
                         }
                         else -> Unit
                     }
@@ -70,6 +78,9 @@ class WizardViewModel(
             is WizardIntent.SetOutputFolder ->
                 _state.update { it.copy(outputFolderPath = intent.path) }
 
+            is WizardIntent.SetSlices ->
+                _state.update { it.copy(slices = intent.slices) }
+
             is WizardIntent.SetPythonPath ->
                 _state.update { it.copy(pythonPath = intent.path, pythonStatus = PythonStatus.UNCHECKED) }
 
@@ -80,9 +91,24 @@ class WizardViewModel(
                 _state.update { it.copy(pythonStatus = intent.status) }
 
             is WizardIntent.SetCheckpointExists ->
-                _state.update { it.copy(checkpointExists = intent.exists) }
+                _state.update {
+                    it.copy(
+                        checkpointExists = intent.exists,
+                        // Found ⇒ clear any download UI; the file is in place.
+                        checkpointDownload = if (intent.exists) CheckpointDownload.Idle else it.checkpointDownload,
+                    )
+                }
 
-            WizardIntent.DownloadCheckpoint -> Unit
+            // Signals the Start screen (jvmMain) to begin the native download; it streams progress
+            // back via SetCheckpointDownload and flips SetCheckpointExists(true) on success.
+            WizardIntent.DownloadCheckpoint ->
+                _state.update { it.copy(checkpointDownload = CheckpointDownload.Connecting) }
+
+            is WizardIntent.SetCheckpointDownload ->
+                _state.update { it.copy(checkpointDownload = intent.status) }
+
+            WizardIntent.CancelCheckpointDownload ->
+                _state.update { it.copy(checkpointDownload = CheckpointDownload.Idle) }
 
             WizardIntent.ProceedToPrompting ->
                 _state.update { it.copy(currentStep = WizardStep.PROMPTING) }
@@ -135,6 +161,7 @@ class WizardViewModel(
                             dicomPath = snapshot.dicomFolderPath,
                             outputDir = snapshot.outputFolderPath,
                             pythonExe = snapshot.pythonPath,
+                            slices = snapshot.slices,
                         )
                     }
                 }

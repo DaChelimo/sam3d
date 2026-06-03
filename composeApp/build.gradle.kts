@@ -55,8 +55,23 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "edu.upenn.sam3d"
+            packageName = "SAM3D"
             packageVersion = "1.0.0"
+            description = "DICOM → G-code: SAM3D scaffold tool-path generator"
+            vendor = "University of Pennsylvania"
+
+            macOS {
+                bundleID = "edu.upenn.sam3d"
+                iconFile.set(project.file("icons/AppIcon.icns"))
+                // Codesign + notarization are wired here at release time — see docs/PACKAGING.md.
+            }
+            windows {
+                iconFile.set(project.file("icons/AppIcon.ico"))
+                menuGroup = "SAM3D"
+            }
+            linux {
+                iconFile.set(project.file("icons/AppIcon.png"))
+            }
         }
     }
 }

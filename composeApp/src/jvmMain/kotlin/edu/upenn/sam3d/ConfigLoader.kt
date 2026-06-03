@@ -2,16 +2,18 @@ package edu.upenn.sam3d
 
 import edu.upenn.sam3d.domain.model.UserConfig
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
 
 /**
- * Loads [UserConfig] (§11.3). Resolution order: <userDataDir>/SAM3D/config.json → bundled
- * config.default.json (classpath) → empty. Read-only and exception-safe, so a missing/corrupt file
- * just falls through to defaults rather than crashing startup.
+ * Loads & saves [UserConfig] (§11.3). Load resolution order: <userDataDir>/SAM3D/config.json →
+ * bundled config.default.json (classpath) → empty. Exception-safe, so a missing/corrupt file just
+ * falls through to defaults rather than crashing startup.
  */
 object ConfigLoader {
     private val json = Json { ignoreUnknownKeys = true }
+    private val prettyJson = Json { prettyPrint = true; encodeDefaults = false; ignoreUnknownKeys = true }
 
     fun load(): UserConfig {
         val userFile = OsUtils.userDataDir().resolve("config.json")
@@ -24,6 +26,19 @@ object ConfigLoader {
                 ?.bufferedReader()?.use { json.decodeFromString<UserConfig>(it.readText()) }
         }.getOrNull()?.let { return it }
         return UserConfig()
+    }
+
+    /**
+     * Persist [config] to <userDataDir>/SAM3D/config.json as pretty JSON (§ task 1). Pass the whole
+     * config — callers should `load()`, copy the field(s) they're changing, then save — so unrelated
+     * keys (paths, python env) are preserved rather than clobbered. Best-effort & exception-safe.
+     */
+    fun save(config: UserConfig) {
+        runCatching {
+            val userFile = OsUtils.userDataDir().resolve("config.json")
+            Files.createDirectories(userFile.parent)
+            Files.writeString(userFile, prettyJson.encodeToString(config))
+        }
     }
 
     /**

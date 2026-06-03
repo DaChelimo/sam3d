@@ -94,6 +94,20 @@ class StdoutProgressParserTest {
     }
 
     @Test
+    fun `tqdm remaining-time is parsed into etaSeconds`() {
+        val p = parser()
+        p.parseLine("model loaded")
+        // "[01:10<02:16, …]" → 2m16s remaining = 136s.
+        val r = p.parseLine(" 33%|███▎      | 2/6 [01:10<02:16, 34.19s/it]")
+        assertEquals(136L, r?.etaSeconds)
+    }
+
+    @Test
+    fun `a line without a tqdm timer has no eta`() {
+        assertNull(parser().parseLine("transforms made")?.etaSeconds)
+    }
+
+    @Test
     fun `GCODE generated maps to COMPLETE`() {
         assertEquals(PipelineStage.COMPLETE, parser().parseLine("GCODE generated")?.stage)
     }

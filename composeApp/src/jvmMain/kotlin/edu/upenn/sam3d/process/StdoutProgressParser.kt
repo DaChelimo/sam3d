@@ -21,6 +21,8 @@ class StdoutProgressParser(
     private val tqdmRegex = Regex("""(\d+)%\|[^|]*\|\s*(\d+)/(\d+)""")
     // Iterator-style tqdm with no total: "Making prompt slices: 6it […]" → step=6.
     private val iterRegex = Regex("""(\d+)it[\s\[]""")
+    // tqdm's own ETA in the "[elapsed<remaining, rate]" suffix — capture the remaining after '<'.
+    private val etaRegex = Regex("""<(\d{1,2}:\d{2}(?::\d{2})?)""")
 
     private var currentStage: PipelineStage? = null
 
@@ -40,10 +42,22 @@ class StdoutProgressParser(
         }
 
         val detail = buildDetail(line, tqdm, stage?.label, isMarker = matched != null)
+        val eta = parseEta(line)
 
         return when {
-            matched != null -> PipelineProgress(matched, percentage, detail = detail)
-            tqdm != null && stage != null -> PipelineProgress(stage, percentage, detail = detail)
+            matched != null -> PipelineProgress(matched, percentage, detail = detail, etaSeconds = eta)
+            tqdm != null && stage != null -> PipelineProgress(stage, percentage, detail = detail, etaSeconds = eta)
+            else -> null
+        }
+    }
+
+    /** tqdm's remaining-time estimate ("…<01:23, …") → seconds, or null if the line has none. */
+    private fun parseEta(line: String): Long? {
+        val m = etaRegex.find(line) ?: return null
+        val parts = m.groupValues[1].split(':').mapNotNull { it.toLongOrNull() }
+        return when (parts.size) {
+            2 -> parts[0] * 60 + parts[1]                       // MM:SS
+            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]     // H:MM:SS
             else -> null
         }
     }

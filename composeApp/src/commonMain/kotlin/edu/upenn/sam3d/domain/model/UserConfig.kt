@@ -15,4 +15,9 @@ data class UserConfig(
     val outputFolderPath: String? = null,
     val pythonPath: String? = null,
     val maxCachedBitmaps: Int? = null,
+    /** sam3d.py `-s` slice count; lets dev flip 8↔120 without editing source (§ task 6). */
+    val slices: Int? = null,
+    /** Persisted main-window size (§ task 1). Null until the user first resizes/closes. */
+    val windowWidth: Int? = null,
+    val windowHeight: Int? = null,
 )

@@ -10,8 +10,9 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import edu.upenn.sam3d.domain.model.Axis
 
 // Green = positive, red = negative — the colour convention from reprompting3d.py / §5.3.
-private val PositiveGreen = Color(0xFF4CAF50)
-private val NegativeRed = Color(0xFFE53935)
+// Carbon support-success (green-40) / support-error (red-50) for visual consistency with the UI.
+private val PositiveGreen = Color(0xFF42BE65)
+private val NegativeRed = Color(0xFFFA4D56)
 
 /**
  * Draws the positive (green) and negative (red) polylines for the currently shown slice on top of

@@ -21,6 +21,17 @@ object OsUtils {
         }
     }
 
+    /** Open [path] with the OS default application (e.g. a .log in the default text viewer). */
+    fun openFile(path: Path) {
+        runCatching {
+            when {
+                isMac() -> ProcessBuilder("open", path.toString()).start()
+                isWindows() -> ProcessBuilder("cmd", "/c", "start", "", path.toString()).start()
+                else -> ProcessBuilder("xdg-open", path.toString()).start()
+            }
+        }
+    }
+
     fun userDataDir(): Path = when {
         isMac() -> Path(System.getProperty("user.home"), "Library", "Application Support", "SAM3D")
         isWindows() -> Path(System.getenv("APPDATA") ?: System.getProperty("user.home"), "SAM3D")

@@ -31,12 +31,13 @@ class PythonPipelineRunner(
     private var manager: PythonProcessManager? = null
     private var forwardJob: Job? = null
 
-    override fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String) {
+    override fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String, slices: Int) {
         val mgr = PythonProcessManager(
             pythonExe = Path.of(pythonExe),
             sam3dScript = Path.of(sam3dGcodeDir, "sam3d.py"),
             workingDir = Path.of(sam3dGcodeDir),
             parser = StdoutProgressParser(),
+            slices = slices,
             logDir = logDir,
         )
         manager = mgr
@@ -52,4 +53,6 @@ class PythonPipelineRunner(
     }
 
     override fun recentOutput(): String = manager?.recentOutput() ?: ""
+
+    override fun logPath(): String? = manager?.logFile()?.toString()
 }

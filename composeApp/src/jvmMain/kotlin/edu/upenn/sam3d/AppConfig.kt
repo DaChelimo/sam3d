@@ -6,7 +6,12 @@ import edu.upenn.sam3d.domain.model.UserConfig
 object AppConfig {
     const val MAX_CACHED_BITMAPS = 256
     const val MAX_CUBE_BYTES = 2L * 1024 * 1024 * 1024  // 2 GB hard limit
-    const val PIPELINE_TIMEOUT_MS = 30 * 60 * 1000L     // 30 minutes
+
+    // §14 / sleep-resilience: the pipeline is killed only after it stops making progress (no new
+    // stdout) for this long — NOT after a fixed total time, since a real Production run is hours and
+    // a healthy long run must not be culled. Sleep is detected and excluded (see PythonProcessManager).
+    const val INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000L   // 20 min with no output → assume stuck
+    const val MAX_RUN_MS = 12 * 60 * 60 * 1000L         // 12 h of *active* time — absolute backstop
 
     object PipelineDefaults {
         const val ROTATIONS = "ico"
@@ -29,6 +34,13 @@ object AppConfig {
     val dicomFolderPath: String? get() = userConfig.dicomFolderPath?.takeIf(String::isNotBlank)
     val outputFolderPath: String? get() = userConfig.outputFolderPath?.takeIf(String::isNotBlank)
     val maxCachedBitmaps: Int get() = userConfig.maxCachedBitmaps ?: MAX_CACHED_BITMAPS
+
+    /** sam3d.py `-s` slice count (§ task 6). Defaults to the engine's 120; set `slices` in config.json. */
+    val slices: Int get() = userConfig.slices?.takeIf { it > 0 } ?: PipelineDefaults.SLICES
+
+    /** Persisted window size (§ task 1); null until first saved. */
+    val windowWidth: Int? get() = userConfig.windowWidth?.takeIf { it > 0 }
+    val windowHeight: Int? get() = userConfig.windowHeight?.takeIf { it > 0 }
 
     /**
      * stdout substrings (lowercase) that flip the pipeline stage, in pipeline order. Centralised

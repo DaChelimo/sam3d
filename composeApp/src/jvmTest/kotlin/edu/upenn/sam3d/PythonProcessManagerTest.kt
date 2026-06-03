@@ -54,6 +54,40 @@ class PythonProcessManagerTest {
         assertEquals(PipelineStage.ERROR, manager.progress.value?.stage)
     }
 
+    @Test
+    fun `a silent (no-output) run is killed by the inactivity watchdog and emits ERROR`() = runBlocking {
+        val script = shellScript("sleep 30")   // emits nothing → trips the inactivity timer
+        val manager = PythonProcessManager(
+            pythonExe = sh,
+            sam3dScript = script,
+            workingDir = script.parent,
+            parser = StdoutProgressParser(),
+            inactivityMs = 400L,                // §2: stop after 400 ms of no output
+        )
+        manager.start(dicomPath = script.parent, outputDir = script.parent).join()
+        assertEquals(PipelineStage.ERROR, manager.progress.value?.stage)
+        assertTrue(
+            manager.recentOutput().contains("stopped", ignoreCase = true),
+            "stop reason should be captured for the error dialog: ${manager.recentOutput()}",
+        )
+    }
+
+    @Test
+    fun `a run that keeps emitting output is NOT killed by the inactivity watchdog`() = runBlocking {
+        // Prints a line every 0.1s for ~1s — well past the 400ms inactivity window, but never idle.
+        val script = shellScript("for i in 1 2 3 4 5 6 7 8 9 10; do echo line\$i; sleep 0.1; done; exit 0")
+        val manager = PythonProcessManager(
+            pythonExe = sh,
+            sam3dScript = script,
+            workingDir = script.parent,
+            parser = StdoutProgressParser(),
+            inactivityMs = 400L,
+        )
+        manager.start(dicomPath = script.parent, outputDir = script.parent).join()
+        assertEquals(PipelineStage.COMPLETE, manager.progress.value?.stage,
+            "a steadily-progressing run must survive the inactivity watchdog")
+    }
+
     private fun shellScript(body: String): Path {
         val f = createTempFile(suffix = ".sh")
         f.toFile().setExecutable(true)

@@ -26,9 +26,11 @@ class WizardPipelineWiringTest {
         val flow = MutableStateFlow<PipelineProgress?>(null)
         override val progress: StateFlow<PipelineProgress?> = flow
         var startedWith: List<String>? = null
+        var startedSlices: Int? = null
         var cancelled = false
-        override fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String) {
+        override fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String, slices: Int) {
             startedWith = listOf(sam3dGcodeDir, dicomPath, outputDir, pythonExe)
+            startedSlices = slices
         }
         override fun cancel() { cancelled = true }
         override fun recentOutput() = "line 18\nline 19\nline 20"
@@ -73,8 +75,10 @@ class WizardPipelineWiringTest {
         model.handle(WizardIntent.SetDicomFolder("/dicom"))
         model.handle(WizardIntent.SetOutputFolder("/out"))
         model.handle(WizardIntent.SetPythonPath("/env/bin/python"))
+        model.handle(WizardIntent.SetSlices(8))
         model.handle(WizardIntent.RunPipeline)
         assertEquals(listOf("/sam3d", "/dicom", "/out", "/env/bin/python"), runner.startedWith)
+        assertEquals(8, runner.startedSlices, "the chosen quality (slice count) must reach the runner")
         assertEquals(WizardStep.PROCESSING, model.state.value.currentStep)
     }
 

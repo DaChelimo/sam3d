@@ -1,12 +1,17 @@
 package edu.upenn.sam3d
 
 import edu.upenn.sam3d.dicom.Dcm4cheLoader
+import edu.upenn.sam3d.dicom.anatomicalPlanes
 import edu.upenn.sam3d.dicom.normaliseVolume
 import edu.upenn.sam3d.dicom.padToCube
+import edu.upenn.sam3d.dicom.requireCubeWithinLimit
 import edu.upenn.sam3d.domain.model.Axis
 import kotlinx.coroutines.runBlocking
+import org.junit.Assume.assumeTrue
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertContentEquals
 import kotlin.test.assertTrue
@@ -96,10 +101,56 @@ class Dcm4cheLoaderTest {
         assertEquals(expected, output[5].toInt() and 0xFF)
     }
 
+    // ── OOM guard (§14, task 3) — pure & CI-safe ─────────────────────────────
+
+    @Test
+    fun `requireCubeWithinLimit - within limit does not throw`() {
+        requireCubeWithinLimit(562)                    // ~177 MB, the real sample's S
+        requireCubeWithinLimit(1000)                   // 1.0 GB, under the 2 GB cap
+    }
+
+    @Test
+    fun `requireCubeWithinLimit - over the limit throws a clear error`() {
+        // 2000³ ≈ 8 GB, well over MAX_CUBE_BYTES (2 GB).
+        val ex = assertFailsWith<IllegalArgumentException> { requireCubeWithinLimit(2000) }
+        assertTrue(ex.message!!.contains("too large"), "message must explain the failure: ${ex.message}")
+    }
+
+    @Test
+    fun `requireCubeWithinLimit - respects an injected limit`() {
+        requireCubeWithinLimit(100, maxBytes = 2_000_000)        // 1e6 ≤ 2e6 → ok
+        assertFailsWith<IllegalArgumentException> { requireCubeWithinLimit(200, maxBytes = 2_000_000) } // 8e6 > 2e6
+    }
+
+    // ── Anatomical plane labels (from ImageOrientationPatient) — pure & CI-safe ──
+
+    @Test
+    fun `anatomicalPlanes - standard axial IOP maps axis2 to Axial`() {
+        // rows along +X (L-R), columns along +Y (A-P) → the classic axial acquisition.
+        val planes = anatomicalPlanes(doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
+        assertEquals(listOf("Coronal", "Sagittal", "Axial"), planes)
+    }
+
+    @Test
+    fun `anatomicalPlanes - coronal acquisition maps axis2 to Coronal`() {
+        // rows along +X (L-R), columns along -Z (S-I) → coronal slices stacked A-P.
+        val planes = anatomicalPlanes(doubleArrayOf(1.0, 0.0, 0.0, 0.0, 0.0, -1.0))
+        assertEquals("Coronal", planes[2])
+        assertEquals("Axial", planes[0])
+        assertEquals("Sagittal", planes[1])
+    }
+
+    @Test
+    fun `anatomicalPlanes - missing IOP falls back to the conventional mapping`() {
+        assertEquals(listOf("Coronal", "Sagittal", "Axial"), anatomicalPlanes(null))
+    }
+
     // ── STEP 7: integration tests with real DICOM series ─────────────────────
+    // Guarded with Assume so CI (where the sample data is absent) skips rather than fails (task 7).
 
     @Test
     fun `loadSeries returns valid DicomSeries for 00000304 data`() = runBlocking {
+        assumeTrue("sample DICOM data not present — skipping", File(DICOM_FOLDER).exists())
         val loader = Dcm4cheLoader()
         val series = loader.loadSeries(DICOM_FOLDER)
         assertTrue(series.cubeSize > 0, "cubeSize must be > 0")
@@ -112,6 +163,7 @@ class Dcm4cheLoaderTest {
 
     @Test
     fun `loadSliceBitmap on AXIS_2 mid-slice returns non-null ImageBitmap`() = runBlocking {
+        assumeTrue("sample DICOM data not present — skipping", File(DICOM_FOLDER).exists())
         val loader = Dcm4cheLoader()
         val series = loader.loadSeries(DICOM_FOLDER)
         val midSlice = series.cubeSize / 2

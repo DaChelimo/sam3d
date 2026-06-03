@@ -13,12 +13,16 @@ interface PipelineRunner {
     /** Latest pipeline progress; null before a run / after cancel. */
     val progress: StateFlow<PipelineProgress?>
 
-    /** Spawn sam3d.py with the working dir = [sam3dGcodeDir] (§7.1). Paths are absolute strings. */
-    fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String)
+    /** Spawn sam3d.py with the working dir = [sam3dGcodeDir] (§7.1). Paths are absolute strings;
+     *  [slices] is the `-s` count chosen on Setup (Draft 8 / Production 120). */
+    fun start(sam3dGcodeDir: String, dicomPath: String, outputDir: String, pythonExe: String, slices: Int)
 
     /** Force-kill the subprocess (Process.destroyForcibly) and clear progress. */
     fun cancel()
 
     /** Last ~20 lines of subprocess output, for the error dialog when a run fails. */
     fun recentOutput(): String
+
+    /** Absolute path of the current/last run's stdout log file, or null if none was written. */
+    fun logPath(): String? = null
 }

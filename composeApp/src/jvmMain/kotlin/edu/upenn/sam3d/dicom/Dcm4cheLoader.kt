@@ -2,6 +2,7 @@ package edu.upenn.sam3d.dicom
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import edu.upenn.sam3d.AppConfig
 import edu.upenn.sam3d.domain.model.Axis
 import edu.upenn.sam3d.domain.model.DicomSeries
 import edu.upenn.sam3d.domain.repository.DicomRepository
@@ -42,6 +43,50 @@ internal fun padToCube(src: ByteArray, dimH: Int, dimW: Int, dimN: Int): Pair<By
 }
 
 /**
+ * §14 OOM guard. The padded cube is an S³ ByteArray held whole in memory; a pathological series
+ * (e.g. S≈1300+) would blow past the heap. Throws a clear, user-facing error before allocation if
+ * S³ exceeds [maxBytes]. Pure & internal so it's unit-testable without loading real DICOMs.
+ */
+/**
+ * Maps each cube axis to the anatomical plane you see when slicing along it, from DICOM
+ * `ImageOrientationPatient` (IOP). Returns labels indexed [AXIS_0, AXIS_1, AXIS_2]. The plane is
+ * named by the normal of the viewed slice: ‖patient-Z → Axial, ‖Y → Coronal, ‖X → Sagittal.
+ *
+ * Array is [H=rows, W=cols, N=slices]; AXIS_0 fixes H (normal = column-dir), AXIS_1 fixes W
+ * (normal = row-dir), AXIS_2 fixes N (normal = row×col). Falls back to the conventional
+ * axial-acquisition mapping when IOP is absent. Pure/internal so it's unit-testable.
+ */
+internal fun anatomicalPlanes(iop: DoubleArray?): List<String> {
+    if (iop == null || iop.size < 6) return listOf("Coronal", "Sagittal", "Axial")
+    val rowDir = doubleArrayOf(iop[0], iop[1], iop[2])   // along increasing column (X)
+    val colDir = doubleArrayOf(iop[3], iop[4], iop[5])   // along increasing row (Y)
+    val sliceNormal = doubleArrayOf(
+        rowDir[1] * colDir[2] - rowDir[2] * colDir[1],
+        rowDir[2] * colDir[0] - rowDir[0] * colDir[2],
+        rowDir[0] * colDir[1] - rowDir[1] * colDir[0],
+    )
+    return listOf(planeOfNormal(colDir), planeOfNormal(rowDir), planeOfNormal(sliceNormal))
+}
+
+private fun planeOfNormal(n: DoubleArray): String {
+    val ax = kotlin.math.abs(n[0]); val ay = kotlin.math.abs(n[1]); val az = kotlin.math.abs(n[2])
+    return when {
+        az >= ax && az >= ay -> "Axial"
+        ay >= ax -> "Coronal"
+        else -> "Sagittal"
+    }
+}
+
+internal fun requireCubeWithinLimit(cubeSize: Int, maxBytes: Long = AppConfig.MAX_CUBE_BYTES) {
+    val bytes = cubeSize.toLong() * cubeSize.toLong() * cubeSize.toLong()
+    require(bytes <= maxBytes) {
+        "DICOM volume too large: the padded cube would be ${cubeSize}³ ≈ ${bytes / (1024 * 1024)} MB, " +
+            "above the ${maxBytes / (1024 * 1024 * 1024)} GB limit. Increase the JVM -Xmx in " +
+            "gradle.properties, use a cropped series, or contact support."
+    }
+}
+
+/**
  * Global min-max normalisation. Mirrors Python utils.load3dmatrix line 28:
  *   image = (image - np.amin(image)) / (np.amax(image) - np.amin(image)) * 255
  */
@@ -64,8 +109,8 @@ class Dcm4cheLoader : DicomRepository {
             ?.toList() ?: emptyList()
         require(dcmFiles.isNotEmpty()) { "No .dcm files found in $folderPath" }
 
-        // Pass 1: read metadata only to determine z-order and dimensions.
-        data class FileMeta(val file: File, val z: Double, val rows: Int, val cols: Int)
+        // Pass 1: read metadata only to determine z-order, dimensions, and orientation.
+        data class FileMeta(val file: File, val z: Double, val rows: Int, val cols: Int, val iop: DoubleArray?)
 
         val metas: List<FileMeta> = dcmFiles.mapNotNull { file ->
             try {
@@ -74,7 +119,7 @@ class Dcm4cheLoader : DicomRepository {
                     val r = attrs.getInt(Tag.Rows, 0)
                     val c = attrs.getInt(Tag.Columns, 0)
                     if (r == 0 || c == 0) null
-                    else FileMeta(file, zCoordOf(attrs, file.name), r, c)
+                    else FileMeta(file, zCoordOf(attrs, file.name), r, c, attrs.getDoubles(Tag.ImageOrientationPatient))
                 }
             } catch (_: Exception) { null }
         }.sortedBy { it.z }
@@ -85,6 +130,9 @@ class Dcm4cheLoader : DicomRepository {
         val cols = metas.first().cols
         val numSlices = metas.size
         val rawShape = Triple(rows, cols, numSlices)
+
+        // §14: bail before the big allocations if the padded cube would exceed the memory limit.
+        requireCubeWithinLimit(maxOf(rows, cols, numSlices))
 
         // Pass 2: allocate a single H×W×N volume array, fill slice by slice.
         // Row-major: idx = h*W*N + w*N + n
@@ -112,7 +160,10 @@ class Dcm4cheLoader : DicomRepository {
         val normalised = normaliseVolume(volume)
         val (cube, cubeSize) = padToCube(normalised, rows, cols, numSlices)
 
-        DicomSeries(folderPath = folderPath, cubeSize = cubeSize, rawShape = rawShape, cube = cube)
+        DicomSeries(
+            folderPath = folderPath, cubeSize = cubeSize, rawShape = rawShape, cube = cube,
+            axisPlanes = anatomicalPlanes(metas.firstOrNull()?.iop),
+        )
     }
 
     override suspend fun loadSliceBitmap(

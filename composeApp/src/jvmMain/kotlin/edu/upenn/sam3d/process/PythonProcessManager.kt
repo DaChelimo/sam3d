@@ -32,10 +32,21 @@ class PythonProcessManager(
     private val sam3dScript: Path,
     private val workingDir: Path,
     private val parser: StdoutProgressParser,
+    private val slices: Int = AppConfig.slices,
+    private val inactivityMs: Long = AppConfig.INACTIVITY_TIMEOUT_MS,
+    private val maxRunMs: Long = AppConfig.MAX_RUN_MS,
     private val logDir: Path? = null,
+    private val sleepInhibitor: SystemSleepInhibitor = SystemSleepInhibitor(),
 ) {
     private var process: Process? = null
     @Volatile private var cancelled = false
+    @Volatile private var timedOut = false
+    @Volatile private var logFilePath: Path? = null
+    // Wall-clock of the last stdout line — drives the inactivity watchdog (§ sleep handling #2).
+    @Volatile private var lastActivityAt = 0L
+
+    /** Absolute path of this run's stdout log, or null if no log dir was configured (§ task 4). */
+    fun logFile(): Path? = logFilePath
 
     private val _progress = MutableStateFlow<PipelineProgress?>(null)
     val progress: StateFlow<PipelineProgress?> = _progress.asStateFlow()
@@ -69,13 +80,14 @@ class PythonProcessManager(
         "-p", dicomPath.toString(),
         "-o", outputDir.toString(),
         "-r", AppConfig.PipelineDefaults.ROTATIONS,
-        "-s", AppConfig.PipelineDefaults.SLICES.toString(),
+        "-s", slices.toString(),   // chosen on Setup via the quality toggle (Draft 8 / Production 120)
         "--checkpoint", AppConfig.PipelineDefaults.CHECKPOINT,
         "--datatype", AppConfig.PipelineDefaults.DATATYPE,
     )
 
     fun start(dicomPath: Path, outputDir: Path): Job {
         cancelled = false
+        timedOut = false
         return scope.launch {
             val cmd = buildCommand(dicomPath, outputDir)
             val proc = ProcessBuilder(cmd)
@@ -83,6 +95,44 @@ class PythonProcessManager(
                 .redirectErrorStream(true)
                 .start()
             process = proc
+            lastActivityAt = System.currentTimeMillis()
+
+            // §1: keep the machine awake for the duration so a walk-away run finishes instead of
+            // freezing on idle sleep. Released in the finally below (covers complete/cancel/error).
+            sleepInhibitor.acquire()
+
+            // §2 watchdog: kill ONLY when the run stops making progress (no new stdout for
+            // [inactivityMs]) or blows past [maxRunMs] of *active* time — never on a fixed total
+            // clock, so a healthy multi-hour Production run survives. Sleep is detected via an
+            // oversized tick gap and excluded, so suspend/resume doesn't look like a stall.
+            val watchdog = launch {
+                val tick = (inactivityMs / 4).coerceIn(100L, 30_000L)
+                var lastTick = System.currentTimeMillis()
+                var activeElapsed = 0L
+                while (true) {
+                    kotlinx.coroutines.delay(tick)
+                    if (!proc.isAlive || cancelled) break
+                    val now = System.currentTimeMillis()
+                    val gap = now - lastTick
+                    lastTick = now
+                    if (gap > tick * 4) {            // machine was asleep/suspended — don't penalise it
+                        lastActivityAt = now
+                        continue
+                    }
+                    activeElapsed += gap
+                    val idleFor = now - lastActivityAt
+                    if (idleFor > inactivityMs || activeElapsed > maxRunMs) {
+                        timedOut = true
+                        remember(
+                            if (idleFor > inactivityMs)
+                                "No new output for ${inactivityMs / 60_000} minutes — the run was stopped (it appears stuck)."
+                            else "Exceeded the ${maxRunMs / 3_600_000} hour run limit — the run was stopped.",
+                        )
+                        proc.destroyForcibly()
+                        break
+                    }
+                }
+            }
 
             // CRITICAL: sam3d.py blocks on input() in the point-cloud refinement loop. Feed "done"
             // so it accepts defaults and proceeds to G-code; without it the subprocess EOFErrors.
@@ -98,13 +148,16 @@ class PythonProcessManager(
                 runCatching {
                     Files.createDirectories(dir)
                     val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
-                    Files.newBufferedWriter(dir.resolve("sam3d-$stamp.log"))
+                    val file = dir.resolve("sam3d-$stamp.log")
+                    logFilePath = file
+                    Files.newBufferedWriter(file)
                 }.getOrNull()
             }
 
             try {
                 proc.inputStream.bufferedReader().use { reader ->
                     reader.lineSequence().forEach { line ->
+                        lastActivityAt = System.currentTimeMillis()  // progress → reset inactivity timer
                         remember(line)
                         logWriter?.let { runCatching { it.write(line); it.newLine() } }
                         parser.parseLine(line)?.let { _progress.value = it }
@@ -112,12 +165,14 @@ class PythonProcessManager(
                 }
             } finally {
                 logWriter?.let { runCatching { it.flush(); it.close() } }
+                sleepInhibitor.release()   // always let the machine sleep again once the run ends
             }
 
             val exitCode = proc.waitFor()
+            watchdog.cancel()
             when {
                 cancelled -> Unit  // cancel() already cleared progress; don't emit ERROR
-                exitCode == 0 -> {
+                exitCode == 0 && !timedOut -> {
                     val gcode = outputDir.resolve("output.gcode")
                     val path = if (Files.exists(gcode)) gcode.toString()
                     else newestGcode(outputDir) ?: gcode.toString()
@@ -141,6 +196,7 @@ class PythonProcessManager(
         cancelled = true
         process?.destroyForcibly()
         process = null
+        sleepInhibitor.release()   // re-allow sleep immediately on cancel
         _progress.value = null
     }
 
