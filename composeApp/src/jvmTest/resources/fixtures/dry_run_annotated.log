@@ -1,0 +1,33 @@
+# Annotated dry run of sam3d.py — Sample-Data/00000304 (padded cube S=562), -r ico -s 8,
+# reusing tempdir/points.json (--reslice 0 --reprompt 0), captured 2026-06-01.
+# Lines below are REAL stdout; "# === STAGE: X ===" comments mark where the parser flips stage.
+# tqdm carriage-return frames are collapsed to a few representative lines.
+
+# === STAGE: LOADING_DICOM ===
+transforms made
+image loaded
+(562, 562, 562)
+# === STAGE: PREPARING_SLICES ===
+Making prompt slices: 0it [00:00, ?it/s]
+Making prompt slices: 6it [07:04, 70.79s/it]
+padding_constant: 102
+Using device →  mps
+# === STAGE: RUNNING_INFERENCE ===
+model loaded
+  0%|          | 0/6 [00:00<?, ?it/s]
+ 33%|███▎      | 2/6 [01:10<02:16, 34.19s/it]
+100%|██████████| 6/6 [03:16<00:00, 32.81s/it]
+# === STAGE: BUILDING_POINT_CLOUD ===
+number of points:  871503
+point cloud refinement
+Created point cloud with 871423 points.
+Enter a command (evaluate, downsample, outliers, done):
+# (the desktop app writes "done\n" to the subprocess stdin at the prompt above)
+# === STAGE: GENERATING_GCODE ===
+Variable Density Printing Pipeline Started
+Executing Voxels2GCode
+Extracting paths:  51%|█████     | 4314/8430 [00:38<00:42, 96.87it/s]
+Writing G-code:  37%|███▋      | 3161/8430 [00:02<00:05, 926.79it/s]
+# === STAGE: COMPLETE ===
+GCODE generated
+Total time elapsed: 20 minutes, 56 seconds.

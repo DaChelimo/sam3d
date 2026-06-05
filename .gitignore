@@ -7,6 +7,8 @@ local.properties
 
 # Log/OS Files
 *.log
+# …but keep committed test fixtures that happen to end in .log
+!composeApp/src/jvmTest/resources/fixtures/dry_run_annotated.log
 
 # Android Studio generated files and folders
 captures/
