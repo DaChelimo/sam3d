@@ -39,28 +39,6 @@ cd ../sam3d
 Then follow the in-app **Setup** screen (each field is explained both on-screen and
 [below](#7-the-in-app-setup-screen-explained)).
 
----
-
-## Do I need Android Studio?
-
-**No.** Despite being a "Kotlin Multiplatform" project, this app targets **only the JVM desktop**
-(`kotlin { jvm() }` — there is no Android target). You never need the Android SDK, an emulator, or
-Android Studio to build or run it.
-
-You have three ways to work with it, in increasing convenience:
-
-| Option | What you need | Good for |
-| --- | --- | --- |
-| **Command line only** | A JDK 17 (see below). The Gradle wrapper (`./gradlew`) is bundled. | Just running/building the app. **No IDE required.** |
-| **IntelliJ IDEA** (Community is free) | The IDE + a JDK. | Editing Kotlin, debugging, the nicest experience. |
-| **Android Studio** | The IDE + a JDK. | Works fine too (it's IntelliJ underneath) — but it's heavier and brings nothing this project uses. **Not recommended just for this.** |
-
-> **Note about `local.properties`:** you may see a `local.properties` file with an `sdk.dir=...`
-> line pointing at an Android SDK. That is a leftover from the Kotlin Multiplatform project template
-> and is **not used** by this JVM-only build. You can ignore it (or delete the file entirely) — it
-> does not need to point anywhere valid.
-
----
 
 ## Prerequisites
 
