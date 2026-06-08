@@ -1,7 +1,10 @@
 package edu.upenn.sam3d.state
 
+import edu.upenn.sam3d.domain.model.AppView
 import edu.upenn.sam3d.domain.model.DicomSeries
 import edu.upenn.sam3d.domain.model.PipelineProgress
+import edu.upenn.sam3d.domain.model.QualityPreset
+import edu.upenn.sam3d.domain.model.RunReport
 import edu.upenn.sam3d.domain.model.SliceAnnotation
 import edu.upenn.sam3d.domain.model.WizardStep
 
@@ -40,9 +43,23 @@ data class WizardState(
     val pythonStatus: PythonStatus = PythonStatus.UNCHECKED,
     val checkpointExists: Boolean = false,
     val checkpointDownload: CheckpointDownload = CheckpointDownload.Idle,
-    // sam3d.py `-s` count, chosen on Setup via the quality toggle (Draft=8 / Production=120).
+    // Setup quality choice (Draft vs Production). Drives BOTH the `-s` slice count and whether the
+    // input is downsampled before annotation + the engine see it (§ pipeline-bottleneck fix).
+    val quality: QualityPreset = QualityPreset.PRODUCTION,
+    // sam3d.py `-s` count — kept in sync with `quality` (SetQuality), still settable on its own.
     val slices: Int = 120,
+    // The DICOM folder actually fed to BOTH the annotation loader and the engine `-p`: the original
+    // folder in Production, or the generated downsampled copy in Draft. Null until resolved.
+    val effectiveDicomPath: String? = null,
+    val dicomDownsampleStatus: DicomDownsampleStatus = DicomDownsampleStatus.Idle,
     val pipelineProgress: PipelineProgress? = null,
     val outputGcodePath: String? = null,
-    val error: PipelineError? = null
+    val error: PipelineError? = null,
+    // Top-level destination (wizard vs. Reports tab). Reports is a sibling of the whole wizard, so
+    // switching to it leaves currentStep untouched and returning resumes exactly where you were.
+    val appView: AppView = AppView.RUN,
+    // The just-finished run's report, shown on the Done screen. Set on the terminal pipeline event.
+    val lastRunReport: RunReport? = null,
+    // All persisted runs, newest first — backs the Reports tab. Loaded lazily when it's opened.
+    val reports: List<RunReport> = emptyList(),
 )

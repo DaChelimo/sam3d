@@ -31,8 +31,10 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.unit.dp
 import edu.upenn.sam3d.AppConfig
 import edu.upenn.sam3d.ConfigLoader
+import edu.upenn.sam3d.domain.model.QualityPreset
 import edu.upenn.sam3d.process.CheckpointDownloader
 import edu.upenn.sam3d.state.CheckpointDownload
+import edu.upenn.sam3d.state.DicomDownsampleStatus
 import edu.upenn.sam3d.state.PythonStatus
 import edu.upenn.sam3d.state.WizardIntent
 import edu.upenn.sam3d.state.WizardState
@@ -41,10 +43,9 @@ import edu.upenn.sam3d.ui.components.CarbonButtonSize
 import edu.upenn.sam3d.ui.components.CarbonButtonVariant
 import edu.upenn.sam3d.ui.components.CarbonIcons
 import edu.upenn.sam3d.ui.components.CarbonStatus
-import edu.upenn.sam3d.ui.components.CarbonStatusGlyph
 import edu.upenn.sam3d.ui.components.CarbonTag
 import edu.upenn.sam3d.ui.components.CarbonTextInput
-import edu.upenn.sam3d.ui.components.CheckpointDownloadBar
+import edu.upenn.sam3d.ui.components.CheckpointBanner
 import edu.upenn.sam3d.ui.components.FilePickerMode
 import edu.upenn.sam3d.ui.components.showFilePicker
 import edu.upenn.sam3d.ui.theme.Carbon
@@ -55,19 +56,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Paths
-
-private data class QualityPreset(val name: String, val slices: Int, val eta: String, val desc: String)
-
-// The only two settings devs actually pick between — slice count is hidden behind a plain-language
-// quality choice with a time estimate. (Edit these numbers/times here if the engine timing changes.)
-private val QUALITY_PRESETS = listOf(
-    QualityPreset("Draft", 8, "≈ 15–20 min", "Fast, lower detail — for testing the workflow."),
-    QualityPreset("Production", 120, "≈ 3–4 hr", "Full detail — for the final scaffold."),
-)
-
-private fun presetIndexFor(slices: Int): Int =
-    QUALITY_PRESETS.indexOfFirst { it.slices == slices }.takeIf { it >= 0 }
-        ?: if (slices <= 20) 0 else 1   // nearest bucket for any custom value
 
 /**
  * Step 1 — Setup (§5.2). Carbon form: three native folder pickers, a Python binary that **verifies
@@ -85,7 +73,7 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
         if (state.dicomFolderPath == null) AppConfig.dicomFolderPath?.let { onIntent(WizardIntent.SetDicomFolder(it)) }
         if (state.outputFolderPath == null) AppConfig.outputFolderPath?.let { onIntent(WizardIntent.SetOutputFolder(it)) }
         if (state.pythonPath == "python3") onIntent(WizardIntent.SetPythonPath(AppConfig.pythonPath))
-        onIntent(WizardIntent.SetSlices(AppConfig.slices)) // restore last-chosen quality
+        onIntent(WizardIntent.SetQuality(AppConfig.quality)) // restore last-chosen quality
     }
 
     // Auto-verify Python so the user never has to click Verify: kick off a check shortly after the
@@ -124,11 +112,14 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     }
 
     fun selectQuality(p: QualityPreset) {
-        onIntent(WizardIntent.SetSlices(p.slices))
-        scope.launch(Dispatchers.IO) { runCatching { ConfigLoader.save(ConfigLoader.load().copy(slices = p.slices)) } }
+        onIntent(WizardIntent.SetQuality(p))
+        scope.launch(Dispatchers.IO) {
+            runCatching { ConfigLoader.save(ConfigLoader.load().copy(quality = p.name, slices = p.slices)) }
+        }
     }
 
-    Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+    Column(Modifier.fillMaxSize()) {
+      Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
         Column(
             modifier = Modifier.fillMaxWidth().widthIn(max = 720.dp)
                 .padding(horizontal = Carbon.spacing.spacing09, vertical = Carbon.spacing.spacing08),
@@ -140,15 +131,23 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                     style = Carbon.type.body01, color = Carbon.theme.textSecondary)
             }
 
-            PathField("SAM3D-GCODE directory", state.sam3dGcodeDir ?: "", "Path to the folder containing sam3d.py",
+            PathField("SAM3D-GCODE directory", state.sam3dGcodeDir ?: "", "e.g. /Users/you/code/SAM3D-GCODE",
+                "The folder where you cloned the SAM3D-GCODE Python engine — it must contain sam3d.py. " +
+                    "This is the research pipeline that does the actual segmentation and G-code generation. " +
+                    "If you don't have it yet, clone it from the SAM3D-GCODE repo first (see the project README).",
                 { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }) {
                 scope.launch { showFilePicker("Select SAM3D-GCODE Directory", FilePickerMode.FOLDER, state.sam3dGcodeDir?.let(::File))?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) } }
             }
-            PathField("DICOM folder", state.dicomFolderPath ?: "", "Folder containing the .dcm series",
+            PathField("DICOM folder", state.dicomFolderPath ?: "", "e.g. /Users/you/scans/patient-001",
+                "The folder holding your CT/MRI scan as a series of .dcm slice files (one file per slice). " +
+                    "Pick the folder itself, not an individual .dcm file.",
                 { onIntent(WizardIntent.SetDicomFolder(it)) }) {
                 scope.launch { showFilePicker("Select DICOM Folder", FilePickerMode.FOLDER, state.dicomFolderPath?.let(::File))?.let { onIntent(WizardIntent.SetDicomFolder(it)) } }
             }
-            PathField("Output folder", state.outputFolderPath ?: "", "Where the generated G-code is written",
+            PathField("Output folder", state.outputFolderPath ?: "", "e.g. /Users/you/sam3d-output",
+                "An empty folder you create for the results — the 3D-printable G-code (output.gcode) and " +
+                    "intermediate files are written here. Make a fresh, empty folder (e.g. \"sam3d-output\") so " +
+                    "results don't get mixed up with other files.",
                 { onIntent(WizardIntent.SetOutputFolder(it)) }) {
                 scope.launch { showFilePicker("Select Output Folder", FilePickerMode.FOLDER, state.outputFolderPath?.let(::File))?.let { onIntent(WizardIntent.SetOutputFolder(it)) } }
             }
@@ -159,25 +158,33 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                 onReverify = { onIntent(WizardIntent.VerifyPython) },
             )
 
-            QualitySection(selectedIndex = presetIndexFor(state.slices), onSelect = ::selectQuality)
-
-            CheckpointSection(
-                state = state,
-                onDownload = { state.sam3dGcodeDir?.let { downloader.start(it) } },
-                onCancel = { downloader.cancel(); onIntent(WizardIntent.CancelCheckpointDownload) },
-            )
+            QualitySection(selected = state.quality, status = state.dicomDownsampleStatus, onSelect = ::selectQuality)
         }
+      }
+
+      // Pinned to the bottom of the Setup screen (the workflow rail is hidden on START, so this spans
+      // the full shell width and reads as a window-level bar). Shows only while the checkpoint is
+      // missing; becomes a live progress bar during download and vanishes once the file is present.
+      CheckpointBanner(
+          state = state,
+          onDownload = { state.sam3dGcodeDir?.let { downloader.start(it) } },
+          onCancel = { downloader.cancel(); onIntent(WizardIntent.CancelCheckpointDownload) },
+          onRetry = { state.sam3dGcodeDir?.let { downloader.start(it) } },
+      )
     }
 }
 
 @Composable
-private fun PathField(label: String, value: String, placeholder: String, onValueChange: (String) -> Unit, onBrowse: () -> Unit) {
+private fun PathField(label: String, value: String, placeholder: String, helper: String, onValueChange: (String) -> Unit, onBrowse: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
         Text(label, style = Carbon.type.label01, color = Carbon.theme.textSecondary)
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
             CarbonTextInput(value = value, onValueChange = onValueChange, placeholder = placeholder, modifier = Modifier.weight(1f))
             CarbonButton("Browse", onBrowse, variant = CarbonButtonVariant.TERTIARY, icon = CarbonIcons.Folder)
         }
+        // Always-on, plain-language explanation of what this folder is and how to get it — kept below
+        // the input so it stays visible after a path is chosen (the placeholder disappears once typed).
+        Text(helper, style = Carbon.type.helperText01, color = Carbon.theme.textHelper)
     }
 }
 
@@ -197,8 +204,17 @@ private fun PythonField(state: WizardState, onPathChange: (String) -> Unit, onRe
         CarbonTextInput(
             value = state.pythonPath,
             onValueChange = onPathChange,
-            placeholder = "/opt/anaconda3/envs/sam3d/bin/python",
+            placeholder = "/opt/anaconda3/envs/SAM3D_GCODE/bin/python",
             modifier = Modifier.fillMaxWidth(),
+        )
+        // Always-on explanation of WHAT to enter and HOW to find it — distinct from the status line
+        // below (which only reports whether the chosen binary runs).
+        Text(
+            "The Python interpreter that has the SAM3D engine's dependencies installed (not the system " +
+                "\"python3\"). If you set the engine up with conda, run \"conda activate SAM3D_GCODE\" then " +
+                "\"which python\" on macOS/Linux (or \"where python\" on Windows) and paste that path here.",
+            style = Carbon.type.helperText01,
+            color = c.textHelper,
         )
         when (state.pythonStatus) {
             PythonStatus.VERIFIED -> Text("Verified automatically — interpreter responded to --version.", style = Carbon.type.helperText01, color = c.textHelper)
@@ -212,17 +228,32 @@ private fun PythonField(state: WizardState, onPathChange: (String) -> Unit, onRe
 }
 
 @Composable
-private fun QualitySection(selectedIndex: Int, onSelect: (QualityPreset) -> Unit) {
+private fun QualitySection(selected: QualityPreset, status: DicomDownsampleStatus, onSelect: (QualityPreset) -> Unit) {
     val c = Carbon.theme
     Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04)) {
         Text("Pipeline quality", style = Carbon.type.label01, color = c.textSecondary)
         Row(horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04), modifier = Modifier.fillMaxWidth()) {
-            QUALITY_PRESETS.forEachIndexed { i, preset ->
-                QualityCard(preset = preset, selected = i == selectedIndex, modifier = Modifier.weight(1f), onClick = { onSelect(preset) })
+            QualityPreset.entries.forEach { preset ->
+                QualityCard(preset = preset, selected = preset == selected, modifier = Modifier.weight(1f), onClick = { onSelect(preset) })
             }
         }
-        Text("Controls how hard the engine works (sam3d.py “-s”). Your choice is remembered for next time.",
-            style = Carbon.type.helperText01, color = c.textHelper)
+        Text(
+            "Draft shrinks the scan to a medium cube (≈${QualityPreset.DRAFT.downsampleTargetMaxDim} voxels) and runs " +
+                "${QualityPreset.DRAFT.slices} slices — a quick preview, for testing the workflow. Production keeps the " +
+                "full-resolution scan and runs ${QualityPreset.PRODUCTION.slices} slices for the final scaffold. " +
+                "Your choice is remembered for next time.",
+            style = Carbon.type.helperText01, color = c.textHelper,
+        )
+        // Draft prepares a downsampled copy of the scan in the background — surface that work so a
+        // brief wait before Prompting reads as progress, not a hang.
+        when (status) {
+            DicomDownsampleStatus.Generating ->
+                Text("Preparing draft volume… (downsampling the scan)", style = Carbon.type.helperText01, color = c.textHelper)
+            is DicomDownsampleStatus.Failed ->
+                Text("Couldn't prepare the draft volume — running at full resolution instead. ${status.message}",
+                    style = Carbon.type.helperText01, color = c.textError)
+            else -> Unit
+        }
     }
 }
 
@@ -239,14 +270,15 @@ private fun QualityCard(preset: QualityPreset, selected: Boolean, modifier: Modi
         verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text(preset.name, style = Carbon.type.headingCompact02, color = c.textPrimary)
+            Text(preset.label, style = Carbon.type.headingCompact02, color = c.textPrimary)
             RadioDot(selected)
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
-            CarbonTag("${preset.slices} slices", status = if (selected) CarbonStatus.INFO else null)
+            CarbonTag(if (preset.downsamples) "≈${preset.downsampleTargetMaxDim}³ · ${preset.slices} slices" else "full · ${preset.slices} slices",
+                status = if (selected) CarbonStatus.INFO else null)
             Text(preset.eta, style = Carbon.type.headingCompact01, color = c.textPrimary)
         }
-        Text(preset.desc, style = Carbon.type.helperText01, color = c.textHelper)
+        Text(preset.description, style = Carbon.type.helperText01, color = c.textHelper)
     }
 }
 
@@ -257,33 +289,5 @@ private fun RadioDot(selected: Boolean) {
         val r = size.minDimension / 2f
         drawCircle(if (selected) c.interactive else c.borderStrong01, radius = r - 1f, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f))
         if (selected) drawCircle(c.interactive, radius = r * 0.5f)
-    }
-}
-
-@Composable
-private fun CheckpointSection(state: WizardState, onDownload: () -> Unit, onCancel: () -> Unit) {
-    val c = Carbon.theme
-    Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04)) {
-        Text("SAM checkpoint", style = Carbon.type.label01, color = c.textSecondary)
-        when {
-            state.sam3dGcodeDir.isNullOrBlank() ->
-                Text("Select the SAM3D-GCODE directory first.", style = Carbon.type.body01, color = c.textHelper)
-
-            state.checkpointExists -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
-                CarbonStatusGlyph(CarbonStatus.SUCCESS, c.supportSuccess, c.background, modifier = Modifier.size(20.dp))
-                Text("sam_vit_h_4b8939.pth found", style = Carbon.type.body01, color = c.textPrimary)
-            }
-
-            state.checkpointDownload.isActive || state.checkpointDownload is CheckpointDownload.Failed ->
-                CheckpointDownloadBar(state = state.checkpointDownload, onCancel = onCancel, onRetry = onDownload)
-
-            else -> Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
-                    CarbonTag("Not downloaded", status = CarbonStatus.WARNING)
-                    Text("Required for inference · 2.4 GB", style = Carbon.type.helperText01, color = c.textHelper)
-                }
-                CarbonButton("Download checkpoint", onDownload, variant = CarbonButtonVariant.TERTIARY, size = CarbonButtonSize.LG, icon = CarbonIcons.Download)
-            }
-        }
     }
 }

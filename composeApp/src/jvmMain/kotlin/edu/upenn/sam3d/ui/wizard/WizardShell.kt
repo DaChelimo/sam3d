@@ -2,6 +2,7 @@ package edu.upenn.sam3d.ui.wizard
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +24,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.unit.dp
+import edu.upenn.sam3d.domain.model.AppView
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.state.PythonStatus
 import edu.upenn.sam3d.state.WizardIntent
@@ -56,8 +60,14 @@ fun WizardShell(viewModel: WizardViewModel) {
 @Composable
 fun WizardShellContent(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     Column(Modifier.fillMaxSize().background(Carbon.theme.background)) {
-        Header(state.pythonStatus)
+        Header(appView = state.appView, pythonStatus = state.pythonStatus, onIntent = onIntent)
         Box(Modifier.fillMaxWidth().height(1.dp).background(Carbon.theme.borderSubtle01))
+
+        // Reports is a sibling of the whole wizard: full-width, no workflow rail or footer.
+        if (state.appView == AppView.REPORTS) {
+            Box(Modifier.weight(1f).fillMaxWidth()) { ReportsScreen(state = state) }
+            return@Column
+        }
 
         Row(Modifier.weight(1f).fillMaxWidth()) {
             // The workflow rail is the high-level map of the 4 phases. It's hidden on Setup (you're
@@ -86,11 +96,11 @@ fun WizardShellContent(state: WizardState, onIntent: (WizardIntent) -> Unit) {
 // ── Header ──────────────────────────────────────────────────────────────────
 
 @Composable
-private fun Header(pythonStatus: PythonStatus) {
+private fun Header(appView: AppView, pythonStatus: PythonStatus, onIntent: (WizardIntent) -> Unit) {
     val c = Carbon.theme
     Row(
         modifier = Modifier.fillMaxWidth().height(48.dp).background(c.background)
-            .padding(horizontal = Carbon.spacing.spacing05),
+            .padding(start = Carbon.spacing.spacing05, end = Carbon.spacing.spacing05),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppMark()
@@ -98,8 +108,33 @@ private fun Header(pythonStatus: PythonStatus) {
         Text("SAM3D", style = Carbon.type.headingCompact02, color = c.textPrimary)
         Spacer(Modifier.width(Carbon.spacing.spacing03))
         Text("DICOM → G-code", style = Carbon.type.label01, color = c.textHelper)
+        Spacer(Modifier.width(Carbon.spacing.spacing07))
+        // Global nav: switch between the run wizard and the run-history Reports tab. Always reachable
+        // (including on Setup, where the workflow rail is hidden), so reports are never stranded.
+        HeaderTab("Run", selected = appView == AppView.RUN) { onIntent(WizardIntent.SetAppView(AppView.RUN)) }
+        HeaderTab("Reports", selected = appView == AppView.REPORTS) { onIntent(WizardIntent.SetAppView(AppView.REPORTS)) }
         Spacer(Modifier.weight(1f))
         PythonStatusTag(pythonStatus)
+    }
+}
+
+/** A header nav item: brighter when active, with a 2px Carbon-blue underline indicator. */
+@Composable
+private fun HeaderTab(label: String, selected: Boolean, onClick: () -> Unit) {
+    val c = Carbon.theme
+    Box(
+        modifier = Modifier.fillMaxHeight().clickable(onClick = onClick).pointerHoverIcon(PointerIcon.Hand)
+            .padding(horizontal = Carbon.spacing.spacing05),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            style = Carbon.type.headingCompact01,
+            color = if (selected) c.textPrimary else c.textSecondary,
+        )
+        if (selected) {
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp).background(c.interactive))
+        }
     }
 }
 
@@ -232,6 +267,7 @@ private fun blockerHint(state: WizardState, enabled: Boolean): String? {
         state.dicomFolderPath.isNullOrBlank() -> "Choose a DICOM folder to continue"
         state.outputFolderPath.isNullOrBlank() -> "Choose an output folder to continue"
         state.pythonStatus != PythonStatus.VERIFIED -> "Verify the Python environment to continue"
+        state.checkpointDownload.isActive -> "Downloading the SAM checkpoint…"
         !state.checkpointExists -> "Download the SAM checkpoint to continue"
         else -> null
     }

@@ -3,6 +3,8 @@ package edu.upenn.sam3d.process
 import edu.upenn.sam3d.AppConfig
 import edu.upenn.sam3d.domain.model.PipelineProgress
 import edu.upenn.sam3d.domain.model.PipelineStage
+import edu.upenn.sam3d.domain.model.RunTiming
+import edu.upenn.sam3d.domain.usecase.StageTimer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -13,7 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
@@ -95,7 +99,14 @@ class PythonProcessManager(
                 .redirectErrorStream(true)
                 .start()
             process = proc
-            lastActivityAt = System.currentTimeMillis()
+            val runStartMs = System.currentTimeMillis()
+            lastActivityAt = runStartMs
+            // Measure real per-stage wall-clock from process launch (so the Reports tab + Done screen
+            // can show "Running SAM inference … 13m" and a Total). Start time → stable id + display.
+            val timer = StageTimer(runStartMs)
+            val startedAt = LocalDateTime.ofInstant(Instant.ofEpochMilli(runStartMs), ZoneId.systemDefault())
+            val runId = startedAt.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+            val runDisplay = startedAt.format(DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a"))
 
             // §1: keep the machine awake for the duration so a walk-away run finishes instead of
             // freezing on idle sleep. Released in the finally below (covers complete/cancel/error).
@@ -160,7 +171,10 @@ class PythonProcessManager(
                         lastActivityAt = System.currentTimeMillis()  // progress → reset inactivity timer
                         remember(line)
                         logWriter?.let { runCatching { it.write(line); it.newLine() } }
-                        parser.parseLine(line)?.let { _progress.value = it }
+                        parser.parseLine(line)?.let {
+                            timer.observe(it.stage, lastActivityAt)  // record the stage transition's wall-clock
+                            _progress.value = it
+                        }
                     }
                 }
             } finally {
@@ -170,15 +184,25 @@ class PythonProcessManager(
 
             val exitCode = proc.waitFor()
             watchdog.cancel()
+            // Close out timing once (unused if cancelled) and carry it on the terminal event so the
+            // ViewModel can persist a RunReport — for failed runs too, which are worth tracking.
+            val endMs = System.currentTimeMillis()
+            val timing = RunTiming(
+                id = runId,
+                startedAtEpochMs = runStartMs,
+                startedAtDisplay = runDisplay,
+                stages = timer.finish(endMs),
+                totalSeconds = timer.totalSeconds(endMs),
+            )
             when {
                 cancelled -> Unit  // cancel() already cleared progress; don't emit ERROR
                 exitCode == 0 && !timedOut -> {
                     val gcode = outputDir.resolve("output.gcode")
                     val path = if (Files.exists(gcode)) gcode.toString()
                     else newestGcode(outputDir) ?: gcode.toString()
-                    _progress.value = PipelineProgress(PipelineStage.COMPLETE, outputPath = path)
+                    _progress.value = PipelineProgress(PipelineStage.COMPLETE, outputPath = path, timing = timing)
                 }
-                else -> _progress.value = PipelineProgress(PipelineStage.ERROR)
+                else -> _progress.value = PipelineProgress(PipelineStage.ERROR, timing = timing)
             }
         }
     }
