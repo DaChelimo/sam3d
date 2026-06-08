@@ -14,8 +14,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import edu.upenn.sam3d.domain.usecase.SaveAnnotationsUseCase
-import edu.upenn.sam3d.process.PythonPipelineRunner
 import edu.upenn.sam3d.state.WizardViewModel
 import edu.upenn.sam3d.ui.SplashScreen
 import edu.upenn.sam3d.ui.theme.AppTheme
@@ -27,18 +25,13 @@ import kotlinx.coroutines.delay
 // this inset keeps the header clear of the traffic-light buttons.
 private val MAC_TITLEBAR_INSET = 28.dp
 
+/**
+ * Root UI. The [viewModel] is created and owned by `main.kt` (in the `application {}` scope) so the
+ * window's `onCloseRequest` can observe busy state (active checkpoint download / running pipeline)
+ * and warn before closing — see main.kt.
+ */
 @Composable
-fun App() {
-    // SaveAnnotationsUseCase writes tempdir/points.json; PythonPipelineRunner spawns sam3d.py and
-    // registers the live process with main.kt's shutdown hook (activeProcessManager).
-    val viewModel = remember {
-        val runner = PythonPipelineRunner(
-            logDir = OsUtils.userDataDir().resolve("logs"),
-            onManagerStarted = { activeProcessManager = it },
-        )
-        WizardViewModel(annotationSaver = SaveAnnotationsUseCase(), pipelineRunner = runner)
-    }
-
+fun App(viewModel: WizardViewModel) {
     var showSplash by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) { delay(2200); showSplash = false }
 

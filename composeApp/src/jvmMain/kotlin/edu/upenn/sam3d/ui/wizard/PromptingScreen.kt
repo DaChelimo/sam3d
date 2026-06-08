@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import edu.upenn.sam3d.dicom.Dcm4cheLoader
 import edu.upenn.sam3d.dicom.DicomBitmapCache
 import edu.upenn.sam3d.domain.model.Axis
+import edu.upenn.sam3d.state.DicomDownsampleStatus
 import edu.upenn.sam3d.state.DrawingMode
 import edu.upenn.sam3d.state.WizardIntent
 import edu.upenn.sam3d.state.WizardState
@@ -80,9 +81,12 @@ fun PromptingScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
 
     val focusRequester = remember { FocusRequester() }
 
-    LaunchedEffect(state.dicomFolderPath, series == null) {
-        val folder = state.dicomFolderPath
-        if (folder != null && series == null) {
+    // Load the cube the user annotates on from the EFFECTIVE path (downsampled copy in Draft, original
+    // otherwise) — the same folder the engine gets, so coordinates match. Wait while Draft is still
+    // generating that copy so we don't load the full-res scan first and reload.
+    LaunchedEffect(state.effectiveDicomPath, state.dicomDownsampleStatus, series == null) {
+        val folder = state.effectiveDicomPath ?: state.dicomFolderPath
+        if (folder != null && series == null && !state.dicomDownsampleStatus.isGenerating) {
             loadError = null
             runCatching { loader.loadSeries(folder) }
                 .onSuccess { onIntent(WizardIntent.DicomSeriesLoaded(it)) }
@@ -212,7 +216,13 @@ fun PromptingScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                 loadError != null -> Box(Modifier.padding(Carbon.spacing.spacing07)) {
                     CarbonInlineNotification(title = "Could not load DICOM", subtitle = loadError, status = CarbonStatus.ERROR)
                 }
-                series == null -> { CarbonSkeleton(Modifier.fillMaxSize()); Text("Loading DICOM volume…", style = Carbon.type.body01, color = c.textOnColor) }
+                series == null -> {
+                    CarbonSkeleton(Modifier.fillMaxSize())
+                    Text(
+                        if (state.dicomDownsampleStatus.isGenerating) "Preparing draft volume…" else "Loading DICOM volume…",
+                        style = Carbon.type.body01, color = c.textOnColor,
+                    )
+                }
                 bitmap == null -> CarbonSkeleton(Modifier.fillMaxHeight(0.9f).aspectRatio(1f))
             }
         }

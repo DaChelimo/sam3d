@@ -10,4 +10,7 @@ data class PipelineProgress(
     // Seconds remaining in the CURRENT stage, parsed from tqdm's own "[mm:ss<mm:ss]" estimate when
     // present (null otherwise). Used by the UI to show an ETA without guessing.
     val etaSeconds: Long? = null,
+    // Final per-stage + total timing, attached only to the terminal COMPLETE/ERROR emission by the
+    // process layer. Null on every in-flight tick. The ViewModel turns it into a persisted RunReport.
+    val timing: RunTiming? = null,
 )

@@ -1,6 +1,7 @@
 package edu.upenn.sam3d
 
 import edu.upenn.sam3d.domain.model.PipelineStage
+import edu.upenn.sam3d.domain.model.QualityPreset
 import edu.upenn.sam3d.domain.model.UserConfig
 
 object AppConfig {
@@ -19,6 +20,11 @@ object AppConfig {
         const val SAM_VERSION = 1
         const val CHECKPOINT = "checkpoints/sam_vit_h_4b8939.pth"
         const val DATATYPE = "dcm"
+        // Draft downsample target: the longest cube side after downsampling, in voxels. At 256³ the
+        // engine's 6 rotated float64 copies total ≈2 GB of transient RAM during the transform — fine on
+        // a 16 GB Mac and far from the full-res 21.6 GB blowup — while keeping enough detail to read the
+        // anatomy. (Source of truth is QualityPreset.DRAFT.downsampleTargetMaxDim; this mirrors it.)
+        const val DRAFT_TARGET_MAX_DIM = 256
     }
 
     /**
@@ -37,6 +43,16 @@ object AppConfig {
 
     /** sam3d.py `-s` slice count (§ task 6). Defaults to the engine's 120; set `slices` in config.json. */
     val slices: Int get() = userConfig.slices?.takeIf { it > 0 } ?: PipelineDefaults.SLICES
+
+    /**
+     * Last-chosen quality preset, restored on the Setup screen. Reads the `quality` key; for
+     * configs written before this key existed, infers it from a low `slices` value so a prior Draft
+     * choice (slices:8) still comes back as Draft.
+     */
+    val quality: QualityPreset
+        get() = userConfig.quality?.let { runCatching { QualityPreset.valueOf(it.uppercase()) }.getOrNull() }
+            ?: userConfig.slices?.let { if (it <= 20) QualityPreset.DRAFT else QualityPreset.PRODUCTION }
+            ?: QualityPreset.PRODUCTION
 
     /** Persisted window size (§ task 1); null until first saved. */
     val windowWidth: Int? get() = userConfig.windowWidth?.takeIf { it > 0 }

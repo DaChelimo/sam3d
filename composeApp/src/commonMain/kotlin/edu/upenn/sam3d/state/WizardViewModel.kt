@@ -1,13 +1,20 @@
 package edu.upenn.sam3d.state
 
+import edu.upenn.sam3d.domain.model.AppView
+import edu.upenn.sam3d.domain.model.PipelineProgress
 import edu.upenn.sam3d.domain.model.PipelineStage
+import edu.upenn.sam3d.domain.model.RunReport
+import edu.upenn.sam3d.domain.model.RunStatus
 import edu.upenn.sam3d.domain.model.SliceAnnotation
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.domain.model.embedVoxel
+import edu.upenn.sam3d.domain.repository.RunReportRepository
 import edu.upenn.sam3d.domain.usecase.AnnotationSaver
+import edu.upenn.sam3d.domain.usecase.DicomDownsampler
 import edu.upenn.sam3d.domain.usecase.PipelineRunner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,10 +32,15 @@ import kotlinx.coroutines.launch
 class WizardViewModel(
     private val annotationSaver: AnnotationSaver? = null,
     private val pipelineRunner: PipelineRunner? = null,
+    private val dicomDownsampler: DicomDownsampler? = null,
+    private val reportStore: RunReportRepository? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val _state = MutableStateFlow(WizardState())
     val state: StateFlow<WizardState> = _state.asStateFlow()
+
+    // The in-flight Draft downsampling job, so a quality/folder change can cancel a stale one.
+    private var downsampleJob: Job? = null
 
     // Transient drawing state (not part of WizardState): when true, the next AddPolylinePoint starts
     // a fresh polyline instead of extending the current one. Set by EndPolyline and by slice/axis
@@ -45,19 +57,25 @@ class WizardViewModel(
                     if (progress == null) return@collect
                     _state.update { it.copy(pipelineProgress = progress) }
                     when (progress.stage) {
-                        PipelineStage.COMPLETE -> _state.update {
-                            it.copy(currentStep = WizardStep.DONE, outputGcodePath = progress.outputPath)
+                        PipelineStage.COMPLETE -> {
+                            _state.update {
+                                it.copy(currentStep = WizardStep.DONE, outputGcodePath = progress.outputPath)
+                            }
+                            recordRun(progress, RunStatus.COMPLETE)
                         }
-                        PipelineStage.ERROR -> _state.update {
+                        PipelineStage.ERROR -> {
                             val out = runner.recentOutput()
-                            it.copy(
-                                error = PipelineError.Server(
-                                    code = 1,
-                                    body = out,
-                                    logPath = runner.logPath(),
-                                    hint = FailureHints.classify(out),
+                            _state.update {
+                                it.copy(
+                                    error = PipelineError.Server(
+                                        code = 1,
+                                        body = out,
+                                        logPath = runner.logPath(),
+                                        hint = FailureHints.classify(out),
+                                    )
                                 )
-                            )
+                            }
+                            recordRun(progress, RunStatus.ERROR)
                         }
                         else -> Unit
                     }
@@ -71,15 +89,31 @@ class WizardViewModel(
             is WizardIntent.SetSam3dGcodeDir ->
                 _state.update { it.copy(sam3dGcodeDir = intent.path, checkpointExists = false) }
 
-            is WizardIntent.SetDicomFolder ->
-                // New folder ⇒ drop the cached cube so Prompting reloads the correct series.
+            is WizardIntent.SetDicomFolder -> {
+                // New folder ⇒ drop the cached cube so Prompting reloads the correct series, then
+                // resolve the effective path (downsampled copy in Draft) for the new folder.
                 _state.update { it.copy(dicomFolderPath = intent.path, dicomSeries = null) }
+                recomputeEffectiveDicomPath()
+            }
 
             is WizardIntent.SetOutputFolder ->
                 _state.update { it.copy(outputFolderPath = intent.path) }
 
             is WizardIntent.SetSlices ->
                 _state.update { it.copy(slices = intent.slices) }
+
+            is WizardIntent.SetQuality -> {
+                // Quality moves two levers together (slices + downsample) and changes the cube, so
+                // drop the cached series and re-resolve the effective DICOM path.
+                _state.update { it.copy(quality = intent.quality, slices = intent.quality.slices, dicomSeries = null) }
+                recomputeEffectiveDicomPath()
+            }
+
+            is WizardIntent.SetEffectiveDicomPath ->
+                _state.update { it.copy(effectiveDicomPath = intent.path, dicomSeries = null) }
+
+            is WizardIntent.SetDownsampleStatus ->
+                _state.update { it.copy(dicomDownsampleStatus = intent.status) }
 
             is WizardIntent.SetPythonPath ->
                 _state.update { it.copy(pythonPath = intent.path, pythonStatus = PythonStatus.UNCHECKED) }
@@ -158,7 +192,9 @@ class WizardViewModel(
                     ) {
                         runner.start(
                             sam3dGcodeDir = snapshot.sam3dGcodeDir,
-                            dicomPath = snapshot.dicomFolderPath,
+                            // Engine reads the SAME folder the user annotated on (downsampled copy in
+                            // Draft, original otherwise) so points.json coordinates line up.
+                            dicomPath = snapshot.effectiveDicomPath ?: snapshot.dicomFolderPath,
                             outputDir = snapshot.outputFolderPath,
                             pythonExe = snapshot.pythonPath,
                             slices = snapshot.slices,
@@ -185,6 +221,90 @@ class WizardViewModel(
                         currentStep = WizardStep.DONE,
                         outputGcodePath = intent.outputPath
                     )
+                }
+
+            is WizardIntent.SetAppView -> {
+                _state.update { it.copy(appView = intent.view) }
+                // Opening Reports pulls the latest from disk (a prior run may have appended since).
+                if (intent.view == AppView.REPORTS) refreshReports()
+            }
+        }
+    }
+
+    /**
+     * Build a [RunReport] from the terminal [progress]'s timing + the current config snapshot, surface
+     * it on the Done screen ([WizardState.lastRunReport]), and persist it. No-op if timing is absent
+     * (e.g. the parser's early COMPLETE before the process layer attaches it, or no runner in tests).
+     */
+    private fun recordRun(progress: PipelineProgress, status: RunStatus) {
+        val timing = progress.timing ?: return
+        val s = _state.value
+        val report = RunReport(
+            id = timing.id,
+            startedAtEpochMs = timing.startedAtEpochMs,
+            startedAtDisplay = timing.startedAtDisplay,
+            quality = s.quality.label,
+            slices = s.slices,
+            downsampleTargetMaxDim = s.quality.downsampleTargetMaxDim,
+            status = status,
+            stages = timing.stages,
+            totalSeconds = timing.totalSeconds,
+            outputPath = if (status == RunStatus.COMPLETE) progress.outputPath else null,
+        )
+        _state.update { it.copy(lastRunReport = report) }
+        val store = reportStore ?: return
+        scope.launch {
+            runCatching {
+                store.append(report)
+                _state.update { it.copy(reports = store.loadAll()) }
+            }
+        }
+    }
+
+    private fun refreshReports() {
+        val store = reportStore ?: return
+        scope.launch {
+            runCatching { store.loadAll() }.getOrNull()?.let { all ->
+                _state.update { it.copy(reports = all) }
+            }
+        }
+    }
+
+    /**
+     * Resolve [WizardState.effectiveDicomPath] for the current folder + quality. Production (or a
+     * missing folder / no downsampler) uses the original folder synchronously. Draft launches the
+     * downsampler off-thread (cancelling any prior run), flips status to Generating, and on success
+     * publishes the cached downsampled folder — used by BOTH the annotation loader and the engine so
+     * the cubes match. On failure it falls back to the original folder so the app stays usable.
+     */
+    private fun recomputeEffectiveDicomPath() {
+        downsampleJob?.cancel()
+        val snapshot = _state.value
+        val folder = snapshot.dicomFolderPath
+        val target = snapshot.quality.downsampleTargetMaxDim
+        if (folder == null) {
+            _state.update { it.copy(effectiveDicomPath = null, dicomDownsampleStatus = DicomDownsampleStatus.Idle) }
+            return
+        }
+        if (target == null || dicomDownsampler == null) {
+            // Production, or no downsampler wired (tests/previews): use the scan as-is.
+            _state.update { it.copy(effectiveDicomPath = folder, dicomDownsampleStatus = DicomDownsampleStatus.Idle) }
+            return
+        }
+        _state.update { it.copy(effectiveDicomPath = null, dicomDownsampleStatus = DicomDownsampleStatus.Generating) }
+        downsampleJob = scope.launch {
+            runCatching { dicomDownsampler.ensureDownsampled(folder, target) }
+                .onSuccess { path ->
+                    _state.update { it.copy(effectiveDicomPath = path, dicomDownsampleStatus = DicomDownsampleStatus.Ready) }
+                }
+                .onFailure { e ->
+                    // Fall back to the full-resolution folder (slow but correct) and surface why.
+                    _state.update {
+                        it.copy(
+                            effectiveDicomPath = folder,
+                            dicomDownsampleStatus = DicomDownsampleStatus.Failed(e.message ?: "Downsampling failed"),
+                        )
+                    }
                 }
         }
     }

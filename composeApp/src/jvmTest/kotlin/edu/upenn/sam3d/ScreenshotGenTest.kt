@@ -2,11 +2,15 @@ package edu.upenn.sam3d
 
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
+import edu.upenn.sam3d.domain.model.AppView
 import edu.upenn.sam3d.domain.model.Axis
 import edu.upenn.sam3d.domain.model.DicomSeries
 import edu.upenn.sam3d.domain.model.PipelineProgress
 import edu.upenn.sam3d.domain.model.PipelineStage
+import edu.upenn.sam3d.domain.model.RunReport
+import edu.upenn.sam3d.domain.model.RunStatus
 import edu.upenn.sam3d.domain.model.SliceAnnotation
+import edu.upenn.sam3d.domain.model.StageDuration
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.domain.model.embedVoxel
 import edu.upenn.sam3d.state.CheckpointDownload
@@ -49,9 +53,19 @@ class ScreenshotGenTest {
 
         shot("01-start", baseReady)
 
+        shot("01b-start-no-checkpoint", baseReady.copy(
+            checkpointExists = false,
+            checkpointDownload = CheckpointDownload.Idle,
+        ))
+
         shot("02-start-downloading", baseReady.copy(
             checkpointExists = false,
             checkpointDownload = CheckpointDownload.InProgress(receivedBytes = 1_010_000_000, totalBytes = 2_400_000_000),
+        ))
+
+        shot("01c-start-checkpoint-failed", baseReady.copy(
+            checkpointExists = false,
+            checkpointDownload = CheckpointDownload.Failed("Connection reset (HTTP 0). Check your network and retry."),
         ))
 
         shot("03-prompting", baseReady.copy(
@@ -102,11 +116,56 @@ class ScreenshotGenTest {
             ),
         ))
 
+        val draftRun = RunReport(
+            id = "20260607-143501", startedAtEpochMs = 0, startedAtDisplay = "Jun 7, 2026 at 2:35 PM",
+            quality = "Draft", slices = 8, downsampleTargetMaxDim = 256, status = RunStatus.COMPLETE,
+            stages = listOf(
+                StageDuration("LOADING_DICOM", "Loading DICOM volume", 22),
+                StageDuration("PREPARING_SLICES", "Preparing slice views", 95),
+                StageDuration("RUNNING_INFERENCE", "Running SAM inference", 786),
+                StageDuration("BUILDING_POINT_CLOUD", "Building point cloud", 61),
+                StageDuration("GENERATING_GCODE", "Generating G-code", 292),
+            ),
+            totalSeconds = 1256, outputPath = "/Users/you/Research/OUTPUT/output.gcode",
+        )
+
         shot("06-done", baseReady.copy(
             currentStep = WizardStep.DONE,
             outputGcodePath = "/Users/you/Research/OUTPUT/output.gcode",
             annotations = List(3) { SliceAnnotation(Axis.AXIS_2, it, listOf(listOf(embedVoxel(Axis.AXIS_2, it, 1, 1))), emptyList()) },
+            lastRunReport = draftRun,
         ))
+
+        shot("07-reports", baseReady.copy(
+            appView = AppView.REPORTS,
+            reports = listOf(
+                draftRun,
+                RunReport(
+                    id = "20260606-090210", startedAtEpochMs = 0, startedAtDisplay = "Jun 6, 2026 at 9:02 AM",
+                    quality = "Production", slices = 120, downsampleTargetMaxDim = null, status = RunStatus.COMPLETE,
+                    stages = listOf(
+                        StageDuration("LOADING_DICOM", "Loading DICOM volume", 41),
+                        StageDuration("PREPARING_SLICES", "Preparing slice views", 312),
+                        StageDuration("RUNNING_INFERENCE", "Running SAM inference", 7980),
+                        StageDuration("BUILDING_POINT_CLOUD", "Building point cloud", 220),
+                        StageDuration("GENERATING_GCODE", "Generating G-code", 2510),
+                    ),
+                    totalSeconds = 11063, outputPath = "/Users/you/Research/OUTPUT/output.gcode",
+                ),
+                RunReport(
+                    id = "20260605-160044", startedAtEpochMs = 0, startedAtDisplay = "Jun 5, 2026 at 4:00 PM",
+                    quality = "Draft", slices = 8, downsampleTargetMaxDim = 256, status = RunStatus.ERROR,
+                    stages = listOf(
+                        StageDuration("LOADING_DICOM", "Loading DICOM volume", 20),
+                        StageDuration("PREPARING_SLICES", "Preparing slice views", 88),
+                        StageDuration("RUNNING_INFERENCE", "Running SAM inference", 134),
+                    ),
+                    totalSeconds = 242, outputPath = null,
+                ),
+            ),
+        ))
+
+        shot("07b-reports-empty", baseReady.copy(appView = AppView.REPORTS, reports = emptyList()))
 
         println("Screenshots written to ${outDir.absolutePath}")
     }

@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -27,6 +29,7 @@ import edu.upenn.sam3d.ui.components.CarbonButtonVariant
 import edu.upenn.sam3d.ui.components.CarbonIcons
 import edu.upenn.sam3d.ui.components.CarbonStatus
 import edu.upenn.sam3d.ui.components.CarbonStatusGlyph
+import edu.upenn.sam3d.ui.components.RunTimingBreakdown
 import edu.upenn.sam3d.ui.theme.Carbon
 import kotlin.io.path.Path
 
@@ -47,6 +50,7 @@ fun DoneScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
 
     Column(
         modifier = Modifier.fillMaxSize().widthIn(max = 720.dp)
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = Carbon.spacing.spacing09, vertical = Carbon.spacing.spacing08),
         verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing07),
     ) {
@@ -90,6 +94,24 @@ fun DoneScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
             Text("$annotatedSlices slice(s) annotated", style = Carbon.type.body01, color = c.textPrimary)
             state.outputFolderPath?.let {
                 Text("Output folder: $it", style = Carbon.type.helperText01, color = c.textHelper)
+            }
+        }
+
+        // How long it took — per stage, then a Total. Saved to the Reports tab for every run.
+        state.lastRunReport?.let { report ->
+            Box(Modifier.fillMaxWidth().height(1.dp).background(c.borderSubtle01))
+            Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04)) {
+                Text("Run timing", style = Carbon.type.label01, color = c.textSecondary)
+                Box(
+                    Modifier.fillMaxWidth().background(c.layer01).border(1.dp, c.borderSubtle01, RectangleShape)
+                        .padding(Carbon.spacing.spacing05),
+                ) {
+                    RunTimingBreakdown(report)
+                }
+                Text(
+                    "Saved to Reports — ${report.quality}, ${report.slices} slices, ${report.resolutionLabel} cube.",
+                    style = Carbon.type.helperText01, color = c.textHelper,
+                )
             }
         }
     }
