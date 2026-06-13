@@ -48,8 +48,9 @@ jobs:
           path: composeApp/build/reports/tests/
           if-no-files-found: ignore
 
-  # Build a native distribution per OS, but only on a version tag (v*). Codesigning/notarization is
-  # intentionally not wired here yet — see docs/PACKAGING.md (deferred to release prep).
+  # Build a native distribution per OS, but only on a version tag (v*).
+  # Each installer bundles a full JRE — users need no Java installed.
+  # Codesigning/notarization is intentionally not wired here yet — see docs/PACKAGING.md.
   package:
     name: Package (${{ matrix.os }})
     needs: test
@@ -62,12 +63,15 @@ jobs:
           - os: macos-latest
             task: packageDmg
             path: composeApp/build/compose/binaries/main/dmg/*.dmg
+            artifact: sam3d-macos
           - os: windows-latest
             task: packageMsi
             path: composeApp/build/compose/binaries/main/msi/*.msi
+            artifact: sam3d-windows
           - os: ubuntu-latest
             task: packageDeb
             path: composeApp/build/compose/binaries/main/deb/*.deb
+            artifact: sam3d-linux
     steps:
       - uses: actions/checkout@v4
 
@@ -82,9 +86,56 @@ jobs:
         shell: bash
         run: ./gradlew :composeApp:${{ matrix.task }} --stacktrace
 
-      - name: Upload installer
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sam3d-${{ matrix.os }}
+          name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+
+  # Collect all three installers and publish them as a GitHub Release.
+  # Users download the file for their OS — no Java installation required.
+  release:
+    name: Publish GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS installer
+        uses: actions/download-artifact@v4
+        with:
+          name: sam3d-macos
+          path: release/
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: sam3d-windows
+          path: release/
+
+      - name: Download Linux installer
+        uses: actions/download-artifact@v4
+        with:
+          name: sam3d-linux
+          path: release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## Installation — no Java required
+
+            Each installer bundles its own JRE. Download the file for your OS, install, and run.
+
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | macOS    | `.dmg` | Open the DMG and drag SAM3D to Applications |
+            | Windows  | `.msi` | Run the installer wizard |
+            | Linux    | `.deb` | `sudo dpkg -i sam3d_*.deb` |
+
+            **Python is still required** for the pipeline engine (`../SAM3D-GCODE/`).
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for setup.

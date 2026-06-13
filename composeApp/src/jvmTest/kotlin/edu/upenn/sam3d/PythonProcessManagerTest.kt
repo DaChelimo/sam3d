@@ -17,6 +17,12 @@ class PythonProcessManagerTest {
     // Use /bin/sh as the "python" interpreter — shell scripts ignore unknown CLI flags.
     private val sh = Path.of("/bin/sh")
 
+    // Process-spawning tests use /bin/sh and only run on Unix.
+    private fun assumeUnix() = org.junit.Assume.assumeTrue(
+        "Test requires /bin/sh — skipped on Windows",
+        !System.getProperty("os.name", "").contains("Windows", ignoreCase = true),
+    )
+
     @Test
     fun `command omits -v (would UnboundLocalError in sam3d_py) and sets the core flags`() {
         val manager = PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser())
@@ -30,6 +36,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `exit code 0 emits COMPLETE stage`() = runBlocking {
+        assumeUnix()
         val script = shellScript("exit 0")
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -43,6 +50,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `non-zero exit code emits ERROR stage`() = runBlocking {
+        assumeUnix()
         val script = shellScript("exit 1")
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -56,6 +64,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `a silent (no-output) run is killed by the inactivity watchdog and emits ERROR`() = runBlocking {
+        assumeUnix()
         val script = shellScript("sleep 30")   // emits nothing → trips the inactivity timer
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -74,6 +83,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `a run that keeps emitting output is NOT killed by the inactivity watchdog`() = runBlocking {
+        assumeUnix()
         // Prints a line every 0.1s for ~1s — well past the 400ms inactivity window, but never idle.
         val script = shellScript("for i in 1 2 3 4 5 6 7 8 9 10; do echo line\$i; sleep 0.1; done; exit 0")
         val manager = PythonProcessManager(
