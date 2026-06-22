@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
     branches: ["**"]
+  # Manual trigger so the portable Windows zip can be built on demand
+  # (e.g. for lab testing) without cutting a version tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -93,11 +96,47 @@ jobs:
           path: ${{ matrix.path }}
           if-no-files-found: error
 
+  # Portable Windows build: the unpacked app image (createDistributable), zipped.
+  # Unlike the .msi this needs NO installer and NO admin rights — the lab user
+  # unzips the folder and double-clicks SAM3D.exe. The JRE is bundled inside
+  # SAM3D/runtime/, so no system-wide Java is required or registered.
+  # Runs on a tag (published with the release) or on manual workflow_dispatch.
+  package-portable-windows:
+    name: Package portable Windows (no installer)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Build unpacked app image
+        shell: bash
+        run: ./gradlew :composeApp:createDistributable --stacktrace
+
+      - name: Zip app image
+        shell: pwsh
+        # Compress the SAM3D folder itself so unzipping yields SAM3D/SAM3D.exe.
+        run: Compress-Archive -Path composeApp/build/compose/binaries/main/app/SAM3D -DestinationPath SAM3D-windows-portable.zip
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam3d-windows-portable
+          path: SAM3D-windows-portable.zip
+          if-no-files-found: error
+
   # Collect all three installers and publish them as a GitHub Release.
   # Users download the file for their OS — no Java installation required.
   release:
     name: Publish GitHub Release
-    needs: package
+    needs: [package, package-portable-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -121,6 +160,12 @@ jobs:
           name: sam3d-linux
           path: release/
 
+      - name: Download portable Windows zip
+        uses: actions/download-artifact@v4
+        with:
+          name: sam3d-windows-portable
+          path: release/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -134,7 +179,8 @@ jobs:
             | Platform | File | Notes |
             |----------|------|-------|
             | macOS    | `.dmg` | Open the DMG and drag SAM3D to Applications |
-            | Windows  | `.msi` | Run the installer wizard |
+            | Windows  | `.msi` | Run the installer wizard (needs admin rights) |
+            | Windows (portable) | `SAM3D-windows-portable.zip` | **No installer, no admin** — unzip and run `SAM3D\SAM3D.exe` |
             | Linux    | `.deb` | `sudo dpkg -i sam3d_*.deb` |
 
             **Python is still required** for the pipeline engine (`../SAM3D-GCODE/`).

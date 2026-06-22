@@ -56,7 +56,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "SAM3D"
-            packageVersion = "1.0.0"
+            packageVersion = "1.1.0"
             description = "DICOM → G-code: SAM3D scaffold tool-path generator"
             vendor = "University of Pennsylvania"
 

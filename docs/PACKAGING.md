@@ -17,6 +17,35 @@ development and internal testing.
 Outputs land under `composeApp/build/compose/binaries/main/<format>/`. Each format must be built on
 its own OS (jpackage is platform-native).
 
+## Portable Windows build (no installer, no admin, no system Java)
+
+For locked-down environments (e.g. lab machines where Java may not be installed *and* installers may
+be blocked), ship the **unpacked app image** instead of the `.msi`:
+
+```
+composeApp/build/compose/binaries/main/app/SAM3D/
+  SAM3D.exe      ← user double-clicks this
+  runtime/       ← bundled JRE (loose files; not registered, not on PATH)
+  app/           ← application jars
+```
+
+Produced by `createDistributable`. Zip the `SAM3D/` folder, hand it over, the user unzips and runs
+`SAM3D\SAM3D.exe`. No installer, no admin rights, and no system-wide Java — the JVM lives entirely
+inside `SAM3D/runtime/`.
+
+**Build constraint:** `createDistributable` is platform-native, so the *Windows* app image can only
+be produced on Windows. From a Mac, build it via CI:
+
+- Push a `v*` tag → the portable zip is attached to the GitHub Release as `SAM3D-windows-portable.zip`.
+- Or trigger **Actions → CI → Run workflow** (`workflow_dispatch`) → download the
+  `sam3d-windows-portable` artifact from that run (no tag needed).
+
+See `.github/workflows/ci.yml`, job `package-portable-windows`.
+
+**Caveat — application whitelisting:** if IT blocks `java.exe` by signature/path wherever it lives,
+the bundled `runtime/bin/java.exe` can still be blocked. The bundled JRE removes the *install*
+requirement, not an active execution ban. Test on a real lab machine to find out which you're facing.
+
 ## App icon
 
 The icon is a Carbon-blue squircle with the cube mark, matching the in-app header glyph. Sources and
