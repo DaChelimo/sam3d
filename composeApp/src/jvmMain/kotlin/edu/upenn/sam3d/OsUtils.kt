@@ -40,4 +40,14 @@ object OsUtils {
             "sam3d",
         )
     }
+
+    /**
+     * The interpreter path inside a venv created by `python -m venv <venvDir>`. venv lays the binary
+     * out differently per platform: `Scripts\python.exe` on Windows, `bin/python` everywhere else.
+     * Used by the one-click environment setup to build, verify, and later run the pipeline.
+     */
+    fun venvPython(venvDir: Path): Path = when {
+        isWindows() -> venvDir.resolve("Scripts").resolve("python.exe")
+        else -> venvDir.resolve("bin").resolve("python")
+    }
 }

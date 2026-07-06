@@ -36,4 +36,23 @@ class FailureHintsTest {
     fun `unrecognised output yields no hint`() {
         assertNull(FailureHints.classify("line 18\nline 19\nline 20"))
     }
+
+    @Test
+    fun `exit code 137 with no recognisable text is diagnosed as an OS-level kill`() {
+        val hint = FailureHints.classify("line 18\nline 19\nline 20", exitCode = 137)
+        assertTrue(hint != null && hint.contains("memory", ignoreCase = true))
+    }
+
+    @Test
+    fun `exit code 137 does not override a more specific text match`() {
+        // Our own inactivity-timeout kill also exits via SIGKILL (137) — its own precise message
+        // must win over the generic OS-kill fallback.
+        val hint = FailureHints.classify("No new output for 20 minutes — the run was stopped.", exitCode = 137)
+        assertTrue(hint != null && hint.contains("stuck", ignoreCase = true))
+    }
+
+    @Test
+    fun `no exit code and no recognisable text still yields no hint`() {
+        assertNull(FailureHints.classify("line 18\nline 19\nline 20", exitCode = null))
+    }
 }

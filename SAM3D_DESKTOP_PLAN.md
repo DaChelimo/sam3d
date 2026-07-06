@@ -30,9 +30,10 @@ run the full SAM3D-GCODE pipeline end-to-end through a graphical wizard — with
 terminal.  The pipeline converts a DICOM CT folder into a variable-density G-code file ready for
 3D printing.
 
-The Python codebase lives in a **separate sibling directory** (`../SAM3D-GCODE/` relative to this
-repo).  Its exact path on disk is user-configured in `AppConfig`; the desktop app discovers it at
-runtime.
+The Python codebase is **vendored in this repo** at `pipeline/` (originally sourced from the
+[SAM3D-GCODE](https://github.com/kpatel3-upenn/SAM3D-GCODE) repo). Its path is still
+user-configurable in `AppConfig`/`config.json`, but the desktop app auto-detects `pipeline/` at
+runtime when present, so a single clone of this repo is normally all that's needed.
 
 ### 1.2 The Full Pipeline (end-to-end flow)
 
@@ -67,7 +68,7 @@ DICOM folder
 ```
 
 ### 1.3 What We Are NOT Building (v1)
-- We do **not** rewrite, wrap, or modify any file inside `SAM3D-GCODE/`.
+- We do **not** rewrite, wrap, or modify any file inside `pipeline/`.
 - We do **not** build a 3D point-cloud viewer (delegated to Python/Open3D).
 - We do **not** build a G-code preview renderer.
 - We do **not** build a Flask HTTP layer — the app talks to Python via subprocess only.
@@ -81,7 +82,7 @@ DICOM folder
 
 | # | Constraint | Rationale |
 |---|-----------|-----------|
-| 1 | **Never touch `SAM3D-GCODE/` source files** | The Python engine is the research product. |
+| 1 | **Never touch `pipeline/` source files** | The Python engine is the research product. |
 | 2 | **All long-running work runs off the main thread** | Compose Desktop's `Dispatchers.Main` dispatches to the Swing EDT via `kotlinx-coroutines-swing`. Blocking it freezes the UI. All I/O, DICOM decoding, subprocess management, and stdout parsing must use coroutines on `Dispatchers.IO` or `Dispatchers.Default`. |
 | 3 | **`commonMain` must contain zero `java.*` / JVM-only APIs** | `java.io.File`, `ProcessBuilder`, `BufferedImage` live only in `jvmMain`. `commonMain` uses Kotlin stdlib + Compose Multiplatform types so it can host a mobile source set in future. |
 | 4 | **Annotation JSON must exactly match what `sam3d.py` feeds to `scale_transform.parse_prompts`** | See §9 for the canonical schema. Any drift = silent inference failure. |

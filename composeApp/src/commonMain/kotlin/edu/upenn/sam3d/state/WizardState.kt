@@ -43,6 +43,9 @@ data class WizardState(
     val pythonStatus: PythonStatus = PythonStatus.UNCHECKED,
     val checkpointExists: Boolean = false,
     val checkpointDownload: CheckpointDownload = CheckpointDownload.Idle,
+    // The one-click environment setup (venv + deps + checkpoint) progress. Drives the Setup screen's
+    // combined banner; on Succeeded it flips pythonStatus→VERIFIED and checkpointExists→true.
+    val envSetup: EnvSetup = EnvSetup.Idle,
     // Setup quality choice (Draft vs Production). Drives BOTH the `-s` slice count and whether the
     // input is downsampled before annotation + the engine see it (§ pipeline-bottleneck fix).
     val quality: QualityPreset = QualityPreset.PRODUCTION,

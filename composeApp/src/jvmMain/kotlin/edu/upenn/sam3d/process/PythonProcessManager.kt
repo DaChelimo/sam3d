@@ -116,13 +116,37 @@ class PythonProcessManager(
             // [inactivityMs]) or blows past [maxRunMs] of *active* time — never on a fixed total
             // clock, so a healthy multi-hour Production run survives. Sleep is detected via an
             // oversized tick gap and excluded, so suspend/resume doesn't look like a stall.
+            //
+            // This is ALSO the only thing standing between an unexpectedly-dead process and a Setup
+            // screen stuck forever on a stale "Processing… N% remaining" (§ resilience fix). The
+            // primary coroutine below only reaches its terminal COMPLETE/ERROR emission once the
+            // blocking stdout read returns EOF — which normally happens the instant the process dies,
+            // but is NOT guaranteed: a still-alive descendant that inherited the stdout fd (or, on a
+            // severely memory-thrashing machine, just an very-delayed reader thread) can leave that
+            // read blocked long after `proc` itself is gone (observed live: the OS silently SIGKILLed
+            // sam3d.py under memory pressure on a large Production run, and the UI sat on a stale
+            // progress bar with no way to know the run had already failed). So this watchdog polls
+            // `proc.isAlive` independently of that blocking read, and the moment it notices the process
+            // is gone — whether from our own timeout below or an external kill — it force-closes the
+            // stdout stream so the primary coroutine unblocks immediately and always reaches a
+            // terminal state instead of hanging.
             val watchdog = launch {
                 val tick = (inactivityMs / 4).coerceIn(100L, 30_000L)
                 var lastTick = System.currentTimeMillis()
                 var activeElapsed = 0L
                 while (true) {
                     kotlinx.coroutines.delay(tick)
-                    if (!proc.isAlive || cancelled) break
+                    if (cancelled) break
+                    if (!proc.isAlive) {
+                        if (!timedOut) {
+                            remember(
+                                "The pipeline process ended unexpectedly — it may have been terminated " +
+                                    "by the operating system (for example, running out of memory).",
+                            )
+                        }
+                        runCatching { proc.inputStream.close() }  // unblock the reader now, don't wait for EOF
+                        break
+                    }
                     val now = System.currentTimeMillis()
                     val gap = now - lastTick
                     lastTick = now
@@ -140,6 +164,7 @@ class PythonProcessManager(
                             else "Exceeded the ${maxRunMs / 3_600_000} hour run limit — the run was stopped.",
                         )
                         proc.destroyForcibly()
+                        runCatching { proc.inputStream.close() }  // ditto: don't wait on a lingering fd
                         break
                     }
                 }
@@ -177,11 +202,19 @@ class PythonProcessManager(
                         }
                     }
                 }
+            } catch (t: Throwable) {
+                // The watchdog above force-closes this stream the moment it notices the process died,
+                // specifically so we land here instead of blocking forever — this is the expected,
+                // non-exceptional path for that case, not a bug. Record it and fall through to the
+                // terminal-state emission below exactly as a clean EOF would.
+                remember("stdout stream ended: ${t.message ?: t::class.simpleName}")
             } finally {
                 logWriter?.let { runCatching { it.flush(); it.close() } }
                 sleepInhibitor.release()   // always let the machine sleep again once the run ends
             }
 
+            // waitFor() is safe to call even if the process is already gone (reaps it / returns its
+            // exit status); never throws for that reason, so no need to guard it further.
             val exitCode = proc.waitFor()
             watchdog.cancel()
             // Close out timing once (unused if cancelled) and carry it on the terminal event so the
@@ -202,7 +235,7 @@ class PythonProcessManager(
                     else newestGcode(outputDir) ?: gcode.toString()
                     _progress.value = PipelineProgress(PipelineStage.COMPLETE, outputPath = path, timing = timing)
                 }
-                else -> _progress.value = PipelineProgress(PipelineStage.ERROR, timing = timing)
+                else -> _progress.value = PipelineProgress(PipelineStage.ERROR, timing = timing, exitCode = exitCode)
             }
         }
     }

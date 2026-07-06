@@ -24,6 +24,12 @@ sealed class WizardIntent {
     object DownloadCheckpoint : WizardIntent()
     object CancelCheckpointDownload : WizardIntent()
     data class SetCheckpointDownload(val status: CheckpointDownload) : WizardIntent()
+
+    /** One-click environment setup (venv + deps + checkpoint). The Start screen owns the manager
+     *  (start/cancel/proceed are direct calls on it) and streams progress back via [SetEnvSetup];
+     *  the ViewModel only reflects it into state. [CancelEnvSetup] resets the state to Idle. */
+    data class SetEnvSetup(val status: EnvSetup) : WizardIntent()
+    object CancelEnvSetup : WizardIntent()
     object ProceedToPrompting : WizardIntent()
     object GoBack : WizardIntent()
 

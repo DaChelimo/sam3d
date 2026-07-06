@@ -68,10 +68,10 @@ class WizardViewModel(
                             _state.update {
                                 it.copy(
                                     error = PipelineError.Server(
-                                        code = 1,
+                                        code = progress.exitCode ?: 1,
                                         body = out,
                                         logPath = runner.logPath(),
-                                        hint = FailureHints.classify(out),
+                                        hint = FailureHints.classify(out, progress.exitCode),
                                     )
                                 )
                             }
@@ -143,6 +143,19 @@ class WizardViewModel(
 
             WizardIntent.CancelCheckpointDownload ->
                 _state.update { it.copy(checkpointDownload = CheckpointDownload.Idle) }
+
+            is WizardIntent.SetEnvSetup ->
+                _state.update {
+                    // On success the checkpoint is definitely present; flip the gate signal here. The
+                    // Start screen also sets pythonPath→the venv (auto-verifies to VERIFIED) + persists.
+                    it.copy(
+                        envSetup = intent.status,
+                        checkpointExists = if (intent.status is EnvSetup.Succeeded) true else it.checkpointExists,
+                    )
+                }
+
+            WizardIntent.CancelEnvSetup ->
+                _state.update { it.copy(envSetup = EnvSetup.Idle) }
 
             WizardIntent.ProceedToPrompting ->
                 _state.update { it.copy(currentStep = WizardStep.PROMPTING) }

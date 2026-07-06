@@ -3,6 +3,8 @@ package edu.upenn.sam3d
 import edu.upenn.sam3d.domain.model.PipelineStage
 import edu.upenn.sam3d.domain.model.QualityPreset
 import edu.upenn.sam3d.domain.model.UserConfig
+import java.nio.file.Path
+import kotlin.io.path.exists
 
 object AppConfig {
     const val MAX_CACHED_BITMAPS = 256
@@ -36,10 +38,46 @@ object AppConfig {
     private val userConfig: UserConfig by lazy { ConfigLoader.load() }
 
     val pythonPath: String get() = userConfig.pythonPath?.takeIf(String::isNotBlank) ?: "python3"
-    val sam3dGcodeDir: String? get() = userConfig.sam3dGcodeDir?.takeIf(String::isNotBlank)
+
+    /**
+     * Resolves to the user-configured path if set; otherwise falls back to the pipeline vendored at
+     * `pipeline/` in this repo. Null only when neither is available (e.g. a packaged app whose cwd is
+     * unrelated), in which case the Start screen surfaces "run from the project root".
+     */
+    val sam3dGcodeDir: String?
+        get() = userConfig.sam3dGcodeDir?.takeIf(String::isNotBlank) ?: bundledPipelineDir()
+
+    /**
+     * Search for the vendored `pipeline/` by walking UP from the working directory. This is necessary
+     * because `./gradlew :composeApp:run` sets cwd to the **module** dir (`composeApp/`), not the repo
+     * root — so we check `composeApp/pipeline` (absent), then `../pipeline` (the real one), and so on.
+     * A handful of levels covers both the gradle-run and run-from-repo-root cases.
+     */
+    private fun bundledPipelineDir(): String? {
+        var dir: Path? = Path.of(System.getProperty("user.dir")).toAbsolutePath()
+        repeat(6) {
+            val d = dir ?: return null
+            if (d.resolve("pipeline").resolve("sam3d.py").exists()) return d.resolve("pipeline").toString()
+            dir = d.parent
+        }
+        return null
+    }
+
     val dicomFolderPath: String? get() = userConfig.dicomFolderPath?.takeIf(String::isNotBlank)
     val outputFolderPath: String? get() = userConfig.outputFolderPath?.takeIf(String::isNotBlank)
     val maxCachedBitmaps: Int get() = userConfig.maxCachedBitmaps ?: MAX_CACHED_BITMAPS
+
+    /**
+     * Where the one-click environment setup builds its Python venv: under the app data dir, NOT inside
+     * `pipeline/` — so the vendored engine stays pristine and the venv survives a `git clean`/re-clone.
+     */
+    val venvDir: Path get() = OsUtils.userDataDir().resolve("venv")
+
+    /** The interpreter inside [venvDir] (platform-aware). This is what a completed setup runs against. */
+    val venvPythonPath: String get() = OsUtils.venvPython(venvDir).toString()
+
+    /** UX hint that setup previously completed; the on-disk venv + checkpoint remain the source of truth. */
+    val setupComplete: Boolean get() = userConfig.setupComplete == true
 
     /** sam3d.py `-s` slice count (§ task 6). Defaults to the engine's 120; set `slices` in config.json. */
     val slices: Int get() = userConfig.slices?.takeIf { it > 0 } ?: PipelineDefaults.SLICES

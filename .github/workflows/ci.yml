@@ -183,5 +183,5 @@ jobs:
             | Windows (portable) | `SAM3D-windows-portable.zip` | **No installer, no admin** — unzip and run `SAM3D\SAM3D.exe` |
             | Linux    | `.deb` | `sudo dpkg -i sam3d_*.deb` |
 
-            **Python is still required** for the pipeline engine (`../SAM3D-GCODE/`).
+            **Python is still required** for the pipeline engine (vendored at `pipeline/`).
             See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for setup.

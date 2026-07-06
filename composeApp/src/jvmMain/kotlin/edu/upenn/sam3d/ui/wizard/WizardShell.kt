@@ -263,7 +263,7 @@ private fun Footer(state: WizardState, isNextEnabled: Boolean, onIntent: (Wizard
 private fun blockerHint(state: WizardState, enabled: Boolean): String? {
     if (enabled || state.currentStep != WizardStep.START) return null
     return when {
-        state.sam3dGcodeDir.isNullOrBlank() -> "Set the SAM3D-GCODE directory to continue"
+        state.sam3dGcodeDir.isNullOrBlank() -> "Couldn't find the bundled pipeline/ engine — run the app from the project root"
         state.dicomFolderPath.isNullOrBlank() -> "Choose a DICOM folder to continue"
         state.outputFolderPath.isNullOrBlank() -> "Choose an output folder to continue"
         state.pythonStatus != PythonStatus.VERIFIED -> "Verify the Python environment to continue"

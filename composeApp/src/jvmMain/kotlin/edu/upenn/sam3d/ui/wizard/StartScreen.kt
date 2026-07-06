@@ -32,21 +32,20 @@ import androidx.compose.ui.unit.dp
 import edu.upenn.sam3d.AppConfig
 import edu.upenn.sam3d.ConfigLoader
 import edu.upenn.sam3d.domain.model.QualityPreset
-import edu.upenn.sam3d.process.CheckpointDownloader
-import edu.upenn.sam3d.state.CheckpointDownload
+import edu.upenn.sam3d.process.EnvironmentSetupManager
 import edu.upenn.sam3d.state.DicomDownsampleStatus
+import edu.upenn.sam3d.state.EnvSetup
 import edu.upenn.sam3d.state.PythonStatus
 import edu.upenn.sam3d.state.WizardIntent
 import edu.upenn.sam3d.state.WizardState
 import edu.upenn.sam3d.ui.components.CarbonButton
-import edu.upenn.sam3d.ui.components.CarbonButtonSize
 import edu.upenn.sam3d.ui.components.CarbonButtonVariant
 import edu.upenn.sam3d.ui.components.CarbonIcons
 import edu.upenn.sam3d.ui.components.CarbonStatus
 import edu.upenn.sam3d.ui.components.CarbonTag
 import edu.upenn.sam3d.ui.components.CarbonTextInput
-import edu.upenn.sam3d.ui.components.CheckpointBanner
 import edu.upenn.sam3d.ui.components.FilePickerMode
+import edu.upenn.sam3d.ui.components.SetupBanner
 import edu.upenn.sam3d.ui.components.showFilePicker
 import edu.upenn.sam3d.ui.theme.Carbon
 import kotlinx.coroutines.Dispatchers
@@ -66,7 +65,10 @@ import java.nio.file.Paths
 @Composable
 fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     val scope = rememberCoroutineScope()
-    val downloader = remember { CheckpointDownloader() }
+    // The one-click environment setup manager — rebuilt if the resolved pipeline dir changes. Null
+    // until the pipeline dir is known (its Set-up button stays disabled meanwhile).
+    val pipelineDir = state.sam3dGcodeDir
+    val setup = remember(pipelineDir) { pipelineDir?.let { EnvironmentSetupManager(pipelineDir = it) } }
 
     LaunchedEffect(Unit) {
         if (state.sam3dGcodeDir == null) AppConfig.sam3dGcodeDir?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }
@@ -85,16 +87,24 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
         onIntent(WizardIntent.VerifyPython)
     }
 
-    LaunchedEffect(downloader) {
-        downloader.state.collect { st ->
-            onIntent(WizardIntent.SetCheckpointDownload(st))
-            if (st is CheckpointDownload.Succeeded) onIntent(WizardIntent.SetCheckpointExists(true))
+    // Stream the environment-setup manager's progress into state. On success, point the app at the
+    // freshly built venv (auto-verifies to VERIFIED) and persist it so next launch is ready instantly.
+    LaunchedEffect(setup) {
+        setup?.state?.collect { st ->
+            onIntent(WizardIntent.SetEnvSetup(st))
+            if (st is EnvSetup.Succeeded) {
+                val venvPy = setup.venvPythonPath()
+                onIntent(WizardIntent.SetPythonPath(venvPy))
+                scope.launch(Dispatchers.IO) {
+                    runCatching { ConfigLoader.save(ConfigLoader.load().copy(pythonPath = venvPy, setupComplete = true)) }
+                }
+            }
         }
     }
 
     LaunchedEffect(state.sam3dGcodeDir) {
         val dir = state.sam3dGcodeDir ?: return@LaunchedEffect
-        if (state.checkpointDownload.isActive) return@LaunchedEffect
+        if (state.envSetup.isActive) return@LaunchedEffect
         val exists = withContext(Dispatchers.IO) { Files.exists(Paths.get(dir, "checkpoints", "sam_vit_h_4b8939.pth")) }
         onIntent(WizardIntent.SetCheckpointExists(exists))
     }
@@ -127,17 +137,11 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
                 Text("Set up your run", style = Carbon.type.heading04, color = Carbon.theme.textPrimary)
-                Text("Point SAM3D at the engine, your DICOM series, and an output folder. Everything runs locally.",
+                Text("Point SAM3D at your DICOM series and an output folder. The segmentation engine is " +
+                    "bundled with the app, and everything runs locally.",
                     style = Carbon.type.body01, color = Carbon.theme.textSecondary)
             }
 
-            PathField("SAM3D-GCODE directory", state.sam3dGcodeDir ?: "", "e.g. /Users/you/code/SAM3D-GCODE",
-                "The folder where you cloned the SAM3D-GCODE Python engine — it must contain sam3d.py. " +
-                    "This is the research pipeline that does the actual segmentation and G-code generation. " +
-                    "If you don't have it yet, clone it from the SAM3D-GCODE repo first (see the project README).",
-                { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }) {
-                scope.launch { showFilePicker("Select SAM3D-GCODE Directory", FilePickerMode.FOLDER, state.sam3dGcodeDir?.let(::File))?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) } }
-            }
             PathField("DICOM folder", state.dicomFolderPath ?: "", "e.g. /Users/you/scans/patient-001",
                 "The folder holding your CT/MRI scan as a series of .dcm slice files (one file per slice). " +
                     "Pick the folder itself, not an individual .dcm file.",
@@ -152,24 +156,18 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                 scope.launch { showFilePicker("Select Output Folder", FilePickerMode.FOLDER, state.outputFolderPath?.let(::File))?.let { onIntent(WizardIntent.SetOutputFolder(it)) } }
             }
 
-            PythonField(
-                state = state,
-                onPathChange = { onIntent(WizardIntent.SetPythonPath(it)) },
-                onReverify = { onIntent(WizardIntent.VerifyPython) },
-            )
-
             QualitySection(selected = state.quality, status = state.dicomDownsampleStatus, onSelect = ::selectQuality)
         }
       }
 
       // Pinned to the bottom of the Setup screen (the workflow rail is hidden on START, so this spans
-      // the full shell width and reads as a window-level bar). Shows only while the checkpoint is
-      // missing; becomes a live progress bar during download and vanishes once the file is present.
-      CheckpointBanner(
+      // the full shell width and reads as a window-level bar). Runs the one-click environment setup
+      // (venv + deps + checkpoint); a live progress bar while active, and gone once the env is ready.
+      SetupBanner(
           state = state,
-          onDownload = { state.sam3dGcodeDir?.let { downloader.start(it) } },
-          onCancel = { downloader.cancel(); onIntent(WizardIntent.CancelCheckpointDownload) },
-          onRetry = { state.sam3dGcodeDir?.let { downloader.start(it) } },
+          onStart = { setup?.start() },
+          onCancel = { setup?.cancel(); onIntent(WizardIntent.CancelEnvSetup) },
+          onRetry = { setup?.start() },
       )
     }
 }
@@ -185,45 +183,6 @@ private fun PathField(label: String, value: String, placeholder: String, helper:
         // Always-on, plain-language explanation of what this folder is and how to get it — kept below
         // the input so it stays visible after a path is chosen (the placeholder disappears once typed).
         Text(helper, style = Carbon.type.helperText01, color = Carbon.theme.textHelper)
-    }
-}
-
-@Composable
-private fun PythonField(state: WizardState, onPathChange: (String) -> Unit, onReverify: () -> Unit) {
-    val c = Carbon.theme
-    Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
-            Text("Python binary", style = Carbon.type.label01, color = c.textSecondary)
-            when (state.pythonStatus) {
-                PythonStatus.VERIFIED -> CarbonTag("Ready", status = CarbonStatus.SUCCESS, showDot = true)
-                PythonStatus.CHECKING -> CarbonTag("Checking…", status = CarbonStatus.INFO, showDot = true)
-                PythonStatus.ERROR -> CarbonTag("Not working", status = CarbonStatus.ERROR, showDot = true)
-                PythonStatus.UNCHECKED -> Unit
-            }
-        }
-        CarbonTextInput(
-            value = state.pythonPath,
-            onValueChange = onPathChange,
-            placeholder = "/opt/anaconda3/envs/SAM3D_GCODE/bin/python",
-            modifier = Modifier.fillMaxWidth(),
-        )
-        // Always-on explanation of WHAT to enter and HOW to find it — distinct from the status line
-        // below (which only reports whether the chosen binary runs).
-        Text(
-            "The Python interpreter that has the SAM3D engine's dependencies installed (not the system " +
-                "\"python3\"). If you set the engine up with conda, run \"conda activate SAM3D_GCODE\" then " +
-                "\"which python\" on macOS/Linux (or \"where python\" on Windows) and paste that path here.",
-            style = Carbon.type.helperText01,
-            color = c.textHelper,
-        )
-        when (state.pythonStatus) {
-            PythonStatus.VERIFIED -> Text("Verified automatically — interpreter responded to --version.", style = Carbon.type.helperText01, color = c.textHelper)
-            PythonStatus.ERROR -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing04)) {
-                Text("Couldn't run that binary. Point it at the sam3d conda environment.", style = Carbon.type.helperText01, color = c.textError)
-                CarbonButton("Re-check", onReverify, variant = CarbonButtonVariant.GHOST, size = CarbonButtonSize.SM)
-            }
-            else -> Text("Verifying automatically when you set the path — no need to click anything.", style = Carbon.type.helperText01, color = c.textHelper)
-        }
     }
 }
 

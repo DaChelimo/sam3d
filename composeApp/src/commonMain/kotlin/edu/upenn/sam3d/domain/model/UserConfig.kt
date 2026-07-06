@@ -22,4 +22,10 @@ data class UserConfig(
     /** Persisted main-window size (§ task 1). Null until the user first resizes/closes. */
     val windowWidth: Int? = null,
     val windowHeight: Int? = null,
+    /**
+     * Hint that the one-click environment setup finished — drives the setup button's label
+     * ("Set up environment" vs "Repair") on relaunch. Source of truth is still the on-disk venv +
+     * checkpoint, probed each launch; this is only a UX hint.
+     */
+    val setupComplete: Boolean? = null,
 )

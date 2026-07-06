@@ -98,6 +98,34 @@ class PythonProcessManagerTest {
             "a steadily-progressing run must survive the inactivity watchdog")
     }
 
+    @Test
+    fun `a process killed out from under us is detected promptly, not just via the inactivity timeout`() = runBlocking {
+        assumeUnix()
+        // Reproduces what was observed on a real Production run killed by the OS under memory
+        // pressure: `proc.isAlive` goes false, but a still-alive descendant (here, a background job
+        // that duplicated the stdout fd) keeps the pipe's write end open, so a plain blocking read
+        // would never see EOF on its own. inactivityMs is set much higher than the ~200ms self-kill so
+        // a pass here proves detection comes from the isAlive-polling watchdog, not the slow fallback.
+        val script = shellScript("exec 3>&1\n(sleep 10 >&3) &\nsleep 0.2\nkill -9 \$\$\n")
+        val manager = PythonProcessManager(
+            pythonExe = sh,
+            sam3dScript = script,
+            workingDir = script.parent,
+            parser = StdoutProgressParser(),
+            inactivityMs = 20_000L,
+        )
+        val start = System.currentTimeMillis()
+        manager.start(dicomPath = script.parent, outputDir = script.parent).join()
+        val elapsed = System.currentTimeMillis() - start
+        assertEquals(PipelineStage.ERROR, manager.progress.value?.stage)
+        assertTrue(
+            elapsed < 9_000,
+            "should detect the dead process via isAlive polling well before the lingering fd's 10s " +
+                "hold or the 20s inactivity timeout (took ${elapsed}ms)",
+        )
+        assertEquals(137, manager.progress.value?.exitCode, "SIGKILL should report as exit code 137")
+    }
+
     private fun shellScript(body: String): Path {
         val f = createTempFile(suffix = ".sh")
         f.toFile().setExecutable(true)
