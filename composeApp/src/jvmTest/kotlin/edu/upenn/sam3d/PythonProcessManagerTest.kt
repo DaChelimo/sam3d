@@ -119,7 +119,10 @@ class PythonProcessManagerTest {
         val elapsed = System.currentTimeMillis() - start
         assertEquals(PipelineStage.ERROR, manager.progress.value?.stage)
         assertTrue(
-            elapsed < 9_000,
+            // Watchdog tick here is inactivityMs / 4 = 5_000ms. Worst case the process dies just
+            // after a tick fires, so detection needs a second tick before isAlive goes false —
+            // up to 2 * 5_000 = 10_000ms — plus scheduling slack on a loaded CI runner.
+            elapsed < 13_000,
             "should detect the dead process via isAlive polling well before the lingering fd's 10s " +
                 "hold or the 20s inactivity timeout (took ${elapsed}ms)",
         )
