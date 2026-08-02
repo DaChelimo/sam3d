@@ -33,7 +33,9 @@ import kotlin.coroutines.coroutineContext
  * both a fire-and-forget [start]/[cancel] + [StateFlow] API (standalone use) and a suspend [download]
  * core that [EnvironmentSetupManager] awaits as one stage of the combined setup.
  */
-class CheckpointDownloader(
+// `open` purely as a test seam: EnvironmentSetupSmokeTest exercises the real setup flow end to end on
+// CI and substitutes this one stage, because a 2.4 GB download per run would make the job unusable.
+open class CheckpointDownloader(
     private val url: String = SAM_VIT_H_URL,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
@@ -76,7 +78,7 @@ class CheckpointDownloader(
      * null when the server sends no length). Cooperatively cancellable. Reused by [start] and by the
      * combined environment setup. Leaves the `.part` behind on interruption so the next call resumes.
      */
-    suspend fun download(dest: Path, onProgress: (Long, Long?) -> Unit = { _, _ -> }) {
+    open suspend fun download(dest: Path, onProgress: (Long, Long?) -> Unit = { _, _ -> }) {
         if (Files.exists(dest)) return // already present → treat as success
         Files.createDirectories(dest.parent)
         val part = dest.resolveSibling("${dest.fileName}.part")
@@ -104,6 +106,9 @@ class CheckpointDownloader(
         try {
             val code = conn.responseCode
             if (code == 416) throw RangeNotSatisfiable()  // Range Not Satisfiable → caller restarts fresh
+            // Anything else outside 2xx is a real failure — a proxy login page, a blocked host, or a
+            // moved asset. Fail with the status instead of letting the stream error out mid-write.
+            if (code !in 200..299) error("HTTP $code from ${conn.url.host}")
             val resuming = existing > 0 && code == HttpURLConnection.HTTP_PARTIAL  // 206: server honoured Range
             val remaining = conn.contentLengthLong.takeIf { it > 0 }
             val total: Long? = if (resuming)

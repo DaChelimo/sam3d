@@ -34,6 +34,41 @@ class PythonProcessManagerTest {
         )
     }
 
+    /**
+     * sam3d.py clears its own intermediates with `os.system('rm -r …')`, which does nothing on
+     * Windows — so `os.makedirs` then raises FileExistsError and the *second* run into an output
+     * folder dies after inference has already completed. We guarantee the precondition instead.
+     */
+    @Test
+    fun `a stale temp folder from a previous run is cleared before launching`() {
+        val outputDir = java.nio.file.Files.createTempDirectory("sam3d-out")
+        try {
+            val stale = outputDir.resolve("temp/segmentation_mask")
+            java.nio.file.Files.createDirectories(stale)
+            java.nio.file.Files.writeString(stale.resolve("leftover.dcm"), "from the last run")
+            val keep = outputDir.resolve("output.gcode")
+            java.nio.file.Files.writeString(keep, "G1 X0 Y0")
+
+            PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser()).clearStaleIntermediates(outputDir)
+
+            assertFalse(java.nio.file.Files.exists(outputDir.resolve("temp")), "temp/ must be gone")
+            assertTrue(java.nio.file.Files.exists(keep), "only temp/ is cleared — real results are left alone")
+        } finally {
+            outputDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `clearing intermediates is a no-op on a fresh output folder`() {
+        val outputDir = java.nio.file.Files.createTempDirectory("sam3d-out")
+        try {
+            PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser()).clearStaleIntermediates(outputDir)
+            assertTrue(java.nio.file.Files.isDirectory(outputDir))
+        } finally {
+            outputDir.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun `exit code 0 emits COMPLETE stage`() = runBlocking {
         assumeUnix()

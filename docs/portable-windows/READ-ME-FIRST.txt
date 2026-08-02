@@ -1,0 +1,72 @@
+SAM3D — portable Windows build
+==============================
+
+No installer. No admin rights. No Java or Python to install first.
+
+
+HOW TO RUN
+----------
+
+1. Unzip this whole folder somewhere you can write to — your Desktop or
+   Documents is ideal.
+
+   Do NOT run SAM3D.exe from inside the .zip file. Windows opens zips as
+   read-only, so the app can't save anything and setup will fail.
+
+   Keep the path short, e.g. C:\Users\<you>\Desktop\SAM3D.
+
+2. Double-click SAM3D.exe.
+
+   If Windows shows a blue "Windows protected your PC" box, that only means
+   the app isn't code-signed. Click "More info", then "Run anyway".
+
+3. THIS IS THE STEP THAT MATTERS: on the Setup screen, click
+   "Set up environment" — once, the first time. Let it finish.
+
+   The app cannot run a scan until this completes. It downloads Python, the
+   pipeline's dependencies, and the ~2.4 GB SAM model file. Expect 15-45
+   minutes on a normal connection and about 8 GB of free disk space. There's
+   a progress bar, you can cancel it, and it picks up where it left off if
+   it's interrupted.
+
+   Everything it downloads goes to your own user folder
+   (%LOCALAPPDATA%\SAM3D). Nothing is installed system-wide.
+
+   You do NOT need to install Python, Git, conda, or anything from a
+   requirements.txt by hand. If a step here tells you to go install
+   something manually, that's a bug — send us the log (see below).
+
+4. When setup finishes, "Continue" unlocks and you can run a scan.
+
+
+BEFORE YOU START A REAL RUN
+---------------------------
+
+- Pick the "Draft" quality preset the first time. It finishes in well under
+  an hour and proves the whole workflow works. "Production" can run
+  overnight on a computer without an NVIDIA graphics card.
+
+- Make a fresh, empty output folder, and keep its path short
+  (C:\sam3d-output is a good choice). Windows can't handle file paths over
+  260 characters, and the pipeline writes several folders deep inside the
+  one you choose.
+
+- The app keeps the computer awake while a run is going, but it won't stop
+  a scheduled restart or someone logging you out.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+
+Setup writes a log to:
+
+    %LOCALAPPDATA%\SAM3D\logs\
+
+Send the newest env-setup-*.log file along with your question and it will
+usually say exactly what failed.
+
+Common causes on a managed or university machine:
+
+- The network blocks github.com or dl.fbaipublicfiles.com. Setup needs both.
+- Antivirus quarantined the downloaded setup tool. The log will say so.
+- Not enough disk space. Setup checks for 8 GB up front and tells you.

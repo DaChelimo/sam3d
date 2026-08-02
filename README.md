@@ -15,14 +15,49 @@ This README walks you through it, end to end.
 
 ---
 
-## TL;DR
+## Just want to use it? Download it.
+
+**You do not need to clone this repository, install Java, install Python, or use a terminal.** Grab
+the build for your machine from the [Releases page](https://github.com/DaChelimo/sam3d/releases) —
+or, for the newest build at a link that never changes,
+[**latest-build**](https://github.com/DaChelimo/sam3d/releases/tag/latest-build):
+
+| Platform | File | How to run it |
+| --- | --- | --- |
+| **Windows (recommended)** | `SAM3D-windows-portable.zip` | Unzip it somewhere you can write to, then run `SAM3D\SAM3D.exe`. No installer, no admin rights. |
+| Windows (installer) | `.msi` | Double-click. Needs admin rights. |
+| macOS | `.dmg` | Open it and drag SAM3D to Applications. |
+| Linux | `.deb` | `sudo dpkg -i sam3d_*.deb` |
+
+Every download bundles both the Java runtime **and** the Python pipeline engine. On first launch,
+click **Set up environment** once: it installs a private Python, the engine's dependencies, and the
+~2.4 GB SAM model checkpoint into your own user folder, with a progress bar, resuming if interrupted.
+
+Budget **~8 GB of free disk** and a connection that can reach `github.com` and
+`dl.fbaipublicfiles.com` (some university networks block one or both).
+
+> **Don't skip "Set up environment".** The app opens and lets you pick folders before the engine's
+> environment exists — but it can't run a scan until that one-time setup finishes. You never need to
+> install Python, Git, or anything from a `requirements.txt` yourself; if you find yourself hunting
+> for one, something is wrong and the setup log will say what.
+>
+> Two smaller Windows notes: unzip the folder before running it (Windows opens `.zip` files
+> read-only, so the app can't save anything from inside one), and if you see a blue "Windows
+> protected your PC" box, that's just the app being unsigned — **More info → Run anyway**.
+
+The rest of this README is for **building from source** — you only need it if you're developing the
+app itself.
+
+---
+
+## TL;DR (building from source)
 
 ```bash
 # 1. Get a JDK 17 (only if you don't already have one — see "Prerequisites")
 # 2. Clone this repo (the pipeline is already included, at pipeline/) and run it:
 git clone https://github.com/DaChelimo/sam3d.git
 cd sam3d
-./gradlew :composeApp:run
+./gradlew :composeApp:run          # gradlew.bat on Windows
 ```
 
 Then, on the in-app **Setup** screen, click **Set up environment** once. It **installs Python**, builds
@@ -90,8 +125,22 @@ sam3d/
 └── pipeline/         ← the Python engine (vendored, never modified — see CLAUDE.md)
 ```
 
-> The engine path is still **configurable in-app** (Setup screen), but the app auto-detects
-> `pipeline/` when run from a checkout of this repo, so you normally don't need to set it.
+**How the app finds the engine**, in order:
+
+1. A `pipeline/` folder above the working directory — i.e. you're running from a checkout. Used in
+   place, so the checkpoint stays at `pipeline/checkpoints/` and nothing about the dev loop changes.
+2. The copy bundled inside the installed app, which is staged out to a writable per-user folder
+   (`…/SAM3D/engine`) on first launch. Installed apps live in read-only locations like
+   `C:\Program Files`, and the engine needs to write there.
+3. Whatever `sam3dGcodeDir` in `config.json` points at, if you set it by hand.
+
+If all three come up empty the Setup screen shows a **Pipeline engine folder** picker rather than
+blocking — but that only happens with a damaged install.
+
+> ⚠️ `pipeline/docs/CROSS_PLATFORM.md` is inherited from the upstream research repo and describes an
+> **older Electron-based** version of this project (`conda activate`, `npm install`,
+> `sam3d-backend.exe`). None of it applies here. It's inside the read-only vendored tree, so it can't
+> be deleted — ignore it and use this README.
 
 ---
 
@@ -179,11 +228,17 @@ safe to leave installed, but worth understanding:
 
 #### The SAM model checkpoint (~2.4 GB)
 
-The Segment Anything **ViT-H** checkpoint (`pipeline/checkpoints/sam_vit_h_4b8939.pth`, ~2.4 GB) is
-downloaded as the **last step of Set up environment** — you don't do anything separately. It lands at
-`pipeline/checkpoints/sam_vit_h_4b8939.pth` (gitignored — never committed) and resumes from a partial
-file if a download is interrupted. If you'd rather fetch it by hand (e.g. to reuse an existing copy),
-run `python pipeline/download_checkpoint.py`; the app detects the file and shows a green ✓ once present.
+The Segment Anything **ViT-H** checkpoint (`sam_vit_h_4b8939.pth`, ~2.4 GB) is downloaded as the
+**last step of Set up environment** — you don't do anything separately. It lands in the engine's
+`checkpoints/` folder and resumes from a partial file if a download is interrupted:
+
+- **From a checkout:** `pipeline/checkpoints/` (gitignored — never committed).
+- **Installed app:** `…/SAM3D/engine/checkpoints/` in your user data folder. App updates re-stage the
+  engine's source files but leave this alone, so upgrading never costs you the download again.
+
+If you'd rather fetch it by hand (e.g. to reuse an existing copy), run
+`python pipeline/download_checkpoint.py`, or just drop the file into that `checkpoints/` folder; the
+app detects it and shows a green ✓ once present.
 
 ### 4. Build & run the desktop app
 
@@ -237,8 +292,16 @@ launch and lives at:
 | OS | Location |
 | --- | --- |
 | **macOS** | `~/Library/Application Support/SAM3D/config.json` |
-| **Windows** | `%APPDATA%\SAM3D\config.json` |
+| **Windows** | `%LOCALAPPDATA%\SAM3D\config.json` |
 | **Linux** | `$XDG_CONFIG_HOME/sam3d/config.json` (usually `~/.config/sam3d/config.json`) |
+
+The same folder holds the Python venv, the staged engine (with its checkpoint), the setup and run
+logs, and `reports.json`.
+
+> **Windows: `%LOCALAPPDATA%`, not `%APPDATA%`.** On a domain-joined machine — a lab PC, typically —
+> `%APPDATA%` (Roaming) is synchronised to a network profile and often quota'd, so several GB of venv
+> and model weights there either fails outright or makes every logon crawl. If you're upgrading from
+> a version that used `%APPDATA%\SAM3D`, the app moves it for you on first launch.
 
 You normally never touch this file — the Setup screen manages it. But if you'd rather **pre-fill the
 paths** so you don't pick them every session, you can edit it directly. All keys are optional:
@@ -282,10 +345,30 @@ Python and the dependencies via `uv`) — they need no pre-installed Python, jus
 
 ## Troubleshooting
 
+- **"Pipeline engine not found" / the Set up button is greyed out.**
+  The app couldn't locate its Python engine. Installed builds ship it and a checkout provides it at
+  `pipeline/`, so this means a damaged or partial install — reinstall from the
+  [Releases page](https://github.com/DaChelimo/sam3d/releases). As a stopgap, the Setup screen shows a
+  **Pipeline engine folder** picker: download this repo's source (**Code → Download ZIP**, no Git
+  needed), extract it, and point the picker at the `pipeline` folder inside.
+- **Windows says "Windows protected your PC" and won't launch it.**
+  The build isn't code-signed. Click **More info → Run anyway**. If nothing happens at all when you
+  double-click, check you unzipped the folder first — Windows opens zips read-only.
 - **"Set up environment" fails.**
-  Almost always a network hiccup while downloading `uv`, Python, or a package. Click **Retry** — it
-  resumes where it left off (`uv` and the checkpoint don't re-download what they already have). The
-  full output is saved to a log under the app's data dir (`…/SAM3D/logs/env-setup-*.log`).
+  Usually the network. Click **Retry** — it resumes where it left off (`uv` and the checkpoint don't
+  re-download what they already have). The full output is saved to a log under the app's data dir
+  (`…/SAM3D/logs/env-setup-*.log`); the error message names the stage and, for import failures, the
+  package. Two causes worth knowing on a managed network:
+  - **Blocked hosts.** Setup needs `github.com` (for `uv` and the SAM source) and
+    `dl.fbaipublicfiles.com` (for the checkpoint). Some university networks block one or both.
+  - **Antivirus.** Defender occasionally quarantines the freshly downloaded `uv.exe`. The log shows it.
+- **Setup fails at "Finishing up" naming a package it can't import.**
+  On Windows this is nearly always a missing **Microsoft Visual C++ Redistributable** — `opencv`,
+  `open3d`, `torch` and `SimpleITK` ship compiled wheels that need it. Install it from Microsoft and
+  hit Retry.
+- **"Not enough free disk space".**
+  Setup needs ~8 GB (Python, PyTorch, the 2.4 GB checkpoint, and working space). It checks up front so
+  you find out in seconds rather than twenty minutes in.
 - **Setup was interrupted (closed the app / lost network).**
   Just click **Set up environment** again — it resumes: `uv` skips what's installed and the checkpoint
   continues from its partial file.
@@ -293,8 +376,18 @@ Python and the dependencies via `uv`) — they need no pre-installed Python, jus
   Almost always a missing dependency or checkpoint. Re-run **Set up environment** (it repairs the
   venv), and confirm `pipeline/checkpoints/sam_vit_h_4b8939.pth` exists.
 - **A Production run is taking hours.**
-  That's expected on CPU (≈3–4 hr at 120 slices). Use the **Draft** preset to validate your
-  workflow first; switch to Production for the final scaffold (ideally on a GPU machine).
+  That's expected on CPU — plan for it to run overnight at 120 slices, because PyPI's Windows PyTorch
+  wheels are CPU-only and a lab desktop is far slower than a developer laptop. Use the **Draft** preset
+  to validate your workflow first; switch to Production for the final scaffold (ideally on a GPU
+  machine). The app keeps the computer awake for the duration.
+- **A run fails right at the end, the second time you use an output folder.**
+  Fixed — the app now clears the engine's `temp/` folder before each run. (The engine cleared it with
+  a Unix `rm` command that does nothing on Windows, so `os.makedirs` then failed *after* inference.)
+  Still, prefer a fresh output folder per run so results don't mix.
+- **A run fails partway through with a file-not-found error deep in the output folder.**
+  Your output path is probably too long. Windows caps paths at 260 characters and the pipeline writes
+  several folders deep inside the one you pick — use something short like `C:\sam3d-output`. The Setup
+  screen warns when the path you chose is risky.
 - **`./gradlew` fails with a Java version error.**
   Your default JDK is older than 17. Install a JDK 17 and/or point `JAVA_HOME` at it.
 - **Build complains about the Android SDK / `local.properties`.**

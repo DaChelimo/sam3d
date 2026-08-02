@@ -48,6 +48,15 @@ private const val DEFAULT_WIDTH = 1280
 private const val DEFAULT_HEIGHT = 800
 
 fun main() {
+    // Route setup's downloads (uv, Python, packages, the checkpoint) through whatever proxy the OS is
+    // configured to use. Managed university networks — the deployment target — usually require one,
+    // and without this every download fails with an opaque timeout on an otherwise online machine.
+    System.setProperty("java.net.useSystemProxies", "true")
+
+    // Windows: carry an existing %APPDATA%\SAM3D (Roaming) install over to %LOCALAPPDATA%. Must run
+    // before anything reads config or resolves the data dir. No-op everywhere else.
+    OsUtils.migrateLegacyUserDataDir()
+
     // §11.3: seed <userDataDir>/SAM3D/config.json from the bundled template on first launch.
     ConfigLoader.ensureUserConfig()
 

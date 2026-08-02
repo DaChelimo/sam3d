@@ -127,13 +127,20 @@ private fun IdleOrFailedRow(dirSet: Boolean, failedMessage: String?, onAction: (
     val c = Carbon.theme
     val failed = failedMessage != null
 
-    val title = if (failed) "Environment setup failed" else "Set up the pipeline environment"
+    val title = when {
+        failed -> "Environment setup failed"
+        !dirSet -> "Pipeline engine not found"
+        else -> "Set up the pipeline environment"
+    }
     val explanation = when {
         failedMessage != null -> failedMessage
         dirSet -> "One click installs Python, builds the environment, installs the pipeline's " +
             "dependencies, and downloads the SAM model checkpoint (~2.4 GB) — no setup required on your " +
             "part. This is a one-time step; if interrupted, it resumes where it left off."
-        else -> "The bundled pipeline/ folder wasn't found — run the app from the project root to enable setup."
+        // The Setup screen shows a folder picker in this case; point at it rather than telling the
+        // user to "run from the project root", which is meaningless for an installed build.
+        else -> "Setup can't start until SAM3D knows where its Python engine is. Use the " +
+            "\"Pipeline engine folder\" field above, or reinstall the app to restore the bundled copy."
     }
 
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {

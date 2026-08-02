@@ -263,12 +263,17 @@ private fun Footer(state: WizardState, isNextEnabled: Boolean, onIntent: (Wizard
 private fun blockerHint(state: WizardState, enabled: Boolean): String? {
     if (enabled || state.currentStep != WizardStep.START) return null
     return when {
-        state.sam3dGcodeDir.isNullOrBlank() -> "Couldn't find the bundled pipeline/ engine — run the app from the project root"
+        state.sam3dGcodeDir.isNullOrBlank() -> "Choose the pipeline engine folder to continue"
         state.dicomFolderPath.isNullOrBlank() -> "Choose a DICOM folder to continue"
         state.outputFolderPath.isNullOrBlank() -> "Choose an output folder to continue"
-        state.pythonStatus != PythonStatus.VERIFIED -> "Verify the Python environment to continue"
+        // Both of these are the job of the one-click setup, not something the user does by hand —
+        // so name that button rather than describing the missing artefact. ("Verify the Python
+        // environment" read as an instruction nobody could act on, moments after the app promised
+        // to manage Python itself.)
+        state.envSetup.isActive -> "Setting up the environment…"
+        state.pythonStatus != PythonStatus.VERIFIED || !state.checkpointExists ->
+            "Click \"Set up environment\" below to continue"
         state.checkpointDownload.isActive -> "Downloading the SAM checkpoint…"
-        !state.checkpointExists -> "Download the SAM checkpoint to continue"
         else -> null
     }
 }

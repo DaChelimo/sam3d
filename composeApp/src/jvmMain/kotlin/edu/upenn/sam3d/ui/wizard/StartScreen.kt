@@ -20,8 +20,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,7 +35,9 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.unit.dp
 import edu.upenn.sam3d.AppConfig
 import edu.upenn.sam3d.ConfigLoader
+import edu.upenn.sam3d.OsUtils
 import edu.upenn.sam3d.domain.model.QualityPreset
+import edu.upenn.sam3d.engine.EngineStager
 import edu.upenn.sam3d.process.EnvironmentSetupManager
 import edu.upenn.sam3d.state.DicomDownsampleStatus
 import edu.upenn.sam3d.state.EnvSetup
@@ -70,8 +76,12 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     val pipelineDir = state.sam3dGcodeDir
     val setup = remember(pipelineDir) { pipelineDir?.let { EnvironmentSetupManager(pipelineDir = it) } }
 
+    // Resolving the engine can stage files out of the app bundle on first launch, so it's off-thread.
     LaunchedEffect(Unit) {
-        if (state.sam3dGcodeDir == null) AppConfig.sam3dGcodeDir?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }
+        if (state.sam3dGcodeDir == null) {
+            withContext(Dispatchers.IO) { AppConfig.sam3dGcodeDir }
+                ?.let { onIntent(WizardIntent.SetSam3dGcodeDir(it)) }
+        }
         if (state.dicomFolderPath == null) AppConfig.dicomFolderPath?.let { onIntent(WizardIntent.SetDicomFolder(it)) }
         if (state.outputFolderPath == null) AppConfig.outputFolderPath?.let { onIntent(WizardIntent.SetOutputFolder(it)) }
         if (state.pythonPath == "python3") onIntent(WizardIntent.SetPythonPath(AppConfig.pythonPath))
@@ -142,6 +152,20 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                     style = Carbon.type.body01, color = Carbon.theme.textSecondary)
             }
 
+            // Only shown when auto-detection failed — an installed build stages its own engine and a
+            // checkout finds pipeline/, so most users never see this. It exists because the app must
+            // never dead-end: before it, a missing engine left the Setup screen with a disabled button
+            // and the advice "run the app from the project root", which means nothing to someone who
+            // installed from a zip. See EngineStager.
+            if (state.sam3dGcodeDir.isNullOrBlank()) {
+                EngineFolderField { picked ->
+                    onIntent(WizardIntent.SetSam3dGcodeDir(picked))
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { ConfigLoader.save(ConfigLoader.load().copy(sam3dGcodeDir = picked)) }
+                    }
+                }
+            }
+
             PathField("DICOM folder", state.dicomFolderPath ?: "", "e.g. /Users/you/scans/patient-001",
                 "The folder holding your CT/MRI scan as a series of .dcm slice files (one file per slice). " +
                     "Pick the folder itself, not an individual .dcm file.",
@@ -155,6 +179,7 @@ fun StartScreen(state: WizardState, onIntent: (WizardIntent) -> Unit) {
                 { onIntent(WizardIntent.SetOutputFolder(it)) }) {
                 scope.launch { showFilePicker("Select Output Folder", FilePickerMode.FOLDER, state.outputFolderPath?.let(::File))?.let { onIntent(WizardIntent.SetOutputFolder(it)) } }
             }
+            OutputFolderWarnings(state.outputFolderPath)
 
             QualitySection(selected = state.quality, status = state.dicomDownsampleStatus, onSelect = ::selectQuality)
         }
@@ -183,6 +208,86 @@ private fun PathField(label: String, value: String, placeholder: String, helper:
         // Always-on, plain-language explanation of what this folder is and how to get it — kept below
         // the input so it stays visible after a path is chosen (the placeholder disappears once typed).
         Text(helper, style = Carbon.type.helperText01, color = Carbon.theme.textHelper)
+    }
+}
+
+/**
+ * Manual escape hatch for locating the Python engine, rendered only when auto-detection came up
+ * empty. Validates the pick immediately — pointing this at the wrong folder is easy, and the failure
+ * would otherwise surface much later as a confusing setup error.
+ */
+@Composable
+private fun EngineFolderField(onPicked: (String) -> Unit) {
+    val c = Carbon.theme
+    val scope = rememberCoroutineScope()
+    var typed by remember { mutableStateOf("") }
+    var invalid by remember { mutableStateOf(false) }
+
+    fun accept(path: String) {
+        typed = path
+        val ok = path.isNotBlank() && EngineStager.isEngineDir(path)
+        invalid = path.isNotBlank() && !ok
+        if (ok) onPicked(path)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing03)) {
+        Text("Pipeline engine folder", style = Carbon.type.label01, color = c.textSecondary)
+        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            CarbonTextInput(
+                value = typed,
+                onValueChange = ::accept,
+                placeholder = "the folder containing ${EngineStager.ENGINE_MARKER}",
+                modifier = Modifier.weight(1f),
+            )
+            CarbonButton("Browse", {
+                scope.launch { showFilePicker("Select the pipeline folder", FilePickerMode.FOLDER, null)?.let(::accept) }
+            }, variant = CarbonButtonVariant.TERTIARY, icon = CarbonIcons.Folder)
+        }
+        Text(
+            if (invalid)
+                "That folder doesn't contain ${EngineStager.ENGINE_MARKER}. Pick the \"pipeline\" folder itself, " +
+                    "not the folder containing it."
+            else
+                "SAM3D couldn't find its bundled Python engine — this normally means an incomplete install. " +
+                    "Reinstall the app, or point it at a copy of the pipeline folder from the SAM3D repository.",
+            style = Carbon.type.helperText01,
+            color = if (invalid) c.textError else c.textHelper,
+        )
+    }
+}
+
+/**
+ * Warnings about the chosen output folder that would otherwise only surface hours into a run:
+ * leftover contents from a previous run, and (on Windows) a path deep enough that the engine's
+ * nested intermediates can exceed MAX_PATH.
+ */
+@Composable
+private fun OutputFolderWarnings(outputFolderPath: String?) {
+    val c = Carbon.theme
+    val notEmpty by produceState(false, outputFolderPath) {
+        val path = outputFolderPath
+        value = path != null && withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = Paths.get(path)
+                Files.isDirectory(dir) && Files.list(dir).use { it.findAny().isPresent }
+            }.getOrDefault(false)
+        }
+    }
+    val longPath = outputFolderPath != null && OsUtils.isPathRiskyForWindows(outputFolderPath)
+    if (!notEmpty && !longPath) return
+
+    Column(verticalArrangement = Arrangement.spacedBy(Carbon.spacing.spacing02)) {
+        if (notEmpty) Text(
+            "This folder isn't empty. Existing files with the same names will be overwritten — pick a " +
+                "fresh folder if you want to keep the previous run's results.",
+            style = Carbon.type.helperText01, color = c.textHelper,
+        )
+        if (longPath) Text(
+            "This path is long. Windows limits file paths to 260 characters and the pipeline writes " +
+                "several folders deep inside it, so a run can fail partway through. Choose somewhere " +
+                "shorter, like C:\\sam3d-output.",
+            style = Carbon.type.helperText01, color = c.textError,
+        )
     }
 }
 

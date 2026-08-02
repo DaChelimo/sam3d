@@ -42,10 +42,9 @@ class UvInstaller(
         if (isInstalled()) return target
         Files.createDirectories(binDir)
         val asset = assetName()
-        val url = "$BASE_URL/$asset"
         val tmp = Files.createTempFile("uv-download", if (asset.endsWith(".zip")) ".zip" else ".tar.gz")
         try {
-            downloadTo(url, tmp)
+            downloadFirstAvailable(downloadUrls(asset), tmp)
             val extractDir = Files.createTempDirectory("uv-extract")
             try {
                 extract(tmp, extractDir)
@@ -62,6 +61,36 @@ class UvInstaller(
         return target
     }
 
+    /**
+     * Candidate download URLs, most-preferred first: the **pinned** uv release, then `latest`.
+     *
+     * Pinning matters because this is deployed to shared lab machines — with `latest` alone, two
+     * people setting up a week apart get different uv builds, and an upstream asset rename silently
+     * breaks every new install on a random Tuesday with no change on our side. The `latest` fallback
+     * means a pin that ages out (a yanked release) degrades to the old behaviour instead of bricking
+     * setup, and the log records which one was used.
+     */
+    internal fun downloadUrls(asset: String): List<String> = listOf(
+        "$RELEASES_URL/download/$UV_VERSION/$asset",
+        "$RELEASES_URL/latest/download/$asset",
+    )
+
+    /** Try each URL in turn; throw a single actionable error if they all fail. */
+    private suspend fun downloadFirstAvailable(urls: List<String>, dest: Path) {
+        val failures = mutableListOf<String>()
+        for (url in urls) {
+            try {
+                downloadTo(url, dest)
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failures += "${url.substringAfterLast('/')}: ${e.message ?: e::class.simpleName}"
+            }
+        }
+        error("Couldn't download uv (${failures.joinToString("; ")})")
+    }
+
     private suspend fun downloadTo(url: String, dest: Path) {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
@@ -69,6 +98,10 @@ class UvInstaller(
             readTimeout = 60_000
         }
         try {
+            // Surface an HTTP status directly: a proxy login page or a 404 from a renamed asset both
+            // otherwise arrive as an opaque stream error halfway through extraction.
+            val code = conn.responseCode
+            if (code !in 200..299) error("HTTP $code from ${conn.url.host}")
             conn.inputStream.use { input ->
                 Files.newOutputStream(dest).use { out ->
                     val buf = ByteArray(1 shl 16)
@@ -134,9 +167,12 @@ class UvInstaller(
     }
 
     companion object {
-        // GitHub's `latest` alias always resolves to the newest release's asset of the given name.
-        // To pin a specific uv version for reproducible builds, swap this for
-        // "https://github.com/astral-sh/uv/releases/download/<version>".
-        const val BASE_URL = "https://github.com/astral-sh/uv/releases/latest/download"
+        const val RELEASES_URL = "https://github.com/astral-sh/uv/releases"
+
+        /**
+         * The uv release every install gets. Bump deliberately (and re-test setup on Windows), rather
+         * than inheriting whatever upstream published this morning — see [downloadUrls].
+         */
+        const val UV_VERSION = "0.11.32"
     }
 }

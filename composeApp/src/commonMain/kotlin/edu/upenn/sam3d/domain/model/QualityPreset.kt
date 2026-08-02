@@ -13,6 +13,12 @@ package edu.upenn.sam3d.domain.model
  * a 16 GB Mac), which `-s` does not touch. Shrinking the cube is the only lever that helps, so DRAFT
  * downsamples the input *and* drops the slice count for a fast smoke test; PRODUCTION leaves the scan
  * untouched for the final scaffold.
+ *
+ * The [eta] values are **ranges, not point estimates**, because they span an order of magnitude with
+ * the hardware. PyPI's Windows PyTorch wheels are CPU-only, so the lab desktops this ships to run SAM
+ * inference many times slower than the developer Mac the original "≈ 3–4 hr" figure came from. A user
+ * who starts a Production run on a promise of "3–4 hr" and finds it still going the next morning
+ * assumes it has hung and kills it — an honest upper bound is worth more than a flattering average.
  */
 enum class QualityPreset(
     val label: String,
@@ -25,7 +31,7 @@ enum class QualityPreset(
         label = "Draft",
         slices = 8,
         downsampleTargetMaxDim = 256,
-        eta = "≈ 5–12 min",
+        eta = "15 min – 1 hr",
         description = "Shrinks the scan to a medium cube (~256 voxels) and runs 8 slices — " +
             "a quick preview with enough detail to read the anatomy, for testing the workflow end to end.",
     ),
@@ -33,8 +39,9 @@ enum class QualityPreset(
         label = "Production",
         slices = 120,
         downsampleTargetMaxDim = null,
-        eta = "≈ 3–4 hr",
-        description = "Full-resolution scan with 120 slices — for the final, print-ready scaffold.",
+        eta = "4 hr – overnight",
+        description = "Full-resolution scan with 120 slices — for the final, print-ready scaffold. " +
+            "Plan for this to run overnight on a CPU-only machine.",
     );
 
     val downsamples: Boolean get() = downsampleTargetMaxDim != null

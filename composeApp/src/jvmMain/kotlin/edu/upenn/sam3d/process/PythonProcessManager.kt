@@ -93,6 +93,7 @@ class PythonProcessManager(
         cancelled = false
         timedOut = false
         return scope.launch {
+            clearStaleIntermediates(outputDir)
             val cmd = buildCommand(dicomPath, outputDir)
             val proc = ProcessBuilder(cmd)
                 .directory(workingDir.toFile())   // CRITICAL: relative paths in sam3d.py need this
@@ -238,6 +239,24 @@ class PythonProcessManager(
                 else -> _progress.value = PipelineProgress(PipelineStage.ERROR, timing = timing, exitCode = exitCode)
             }
         }
+    }
+
+    /**
+     * Delete `<outputDir>/temp` before launching, because the engine cannot do it on Windows.
+     *
+     * sam3d.py clears its own intermediates with `os.system(f'rm -r {temp}')` (sam3d.py:242). `rm`
+     * doesn't exist in `cmd.exe`, so on Windows the call silently does nothing, the directory
+     * survives, and the very next line — `os.makedirs(temp)` — raises FileExistsError. That happens
+     * *after* SAM inference, so the second run into a given output folder throws away hours of work
+     * seconds before it would have written the G-code. The engine is vendored read-only, so the fix
+     * has to live here: guarantee the precondition it assumes rather than patch the Python.
+     *
+     * Best-effort by design — if the delete fails (a file open in another program), the run proceeds
+     * and fails exactly as it does today rather than being blocked by our cleanup.
+     */
+    internal fun clearStaleIntermediates(outputDir: Path) {
+        val temp = outputDir.resolve("temp")
+        runCatching { if (Files.isDirectory(temp)) temp.toFile().deleteRecursively() }
     }
 
     private fun newestGcode(dir: Path): String? = runCatching {
