@@ -104,7 +104,9 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "SAM3D"
-            packageVersion = "1.2.0"
+            // Must stay ahead of the newest published tag: Windows MSI upgrade logic keys off this,
+            // and an installer numbered at or below the installed build can refuse to replace it.
+            packageVersion = "1.2.2"
             description = "DICOM → G-code: SAM3D scaffold tool-path generator"
             vendor = "University of Pennsylvania"
 
