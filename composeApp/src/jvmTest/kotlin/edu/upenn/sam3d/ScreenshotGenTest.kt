@@ -3,6 +3,7 @@ package edu.upenn.sam3d
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import edu.upenn.sam3d.domain.model.AppView
+import edu.upenn.sam3d.domain.model.UpdateStatus
 import edu.upenn.sam3d.domain.model.Axis
 import edu.upenn.sam3d.domain.model.DicomSeries
 import edu.upenn.sam3d.domain.model.PipelineProgress
@@ -52,6 +53,10 @@ class ScreenshotGenTest {
         shotComposable("00-splash") { AppTheme { SplashScreen() } }
 
         shot("01-start", baseReady)
+
+        shot("01d-update-available", baseReady.copy(
+            update = UpdateStatus.Available("1.2.4", "https://github.com/DaChelimo/sam3d/releases/latest"),
+        ))
 
         shot("01b-start-no-checkpoint", baseReady.copy(
             checkpointExists = false,

@@ -57,4 +57,7 @@ sealed class WizardIntent {
 
     /** Switch the top-level destination (wizard ↔ Reports tab). Loads reports when opening REPORTS. */
     data class SetAppView(val view: AppView) : WizardIntent()
+
+    /** Hide the update banner for the rest of this launch. */
+    object DismissUpdate : WizardIntent()
 }

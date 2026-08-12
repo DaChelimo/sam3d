@@ -35,6 +35,23 @@ object OsUtils {
     }
 
     /**
+     * Open [url] in the default browser.
+     *
+     * Separate from [openFile] because Windows differs: `cmd /c start` treats `&` in a URL as a
+     * command separator, so it is the wrong tool here even though both "open a thing" — `rundll32`
+     * hands the whole string to the shell's URL handler intact.
+     */
+    fun openUrl(url: String) {
+        runCatching {
+            when {
+                isMac() -> ProcessBuilder("open", url).start()
+                isWindows() -> ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start()
+                else -> ProcessBuilder("xdg-open", url).start()
+            }
+        }
+    }
+
+    /**
      * Where the app keeps everything it owns: config.json, logs, run reports, the Python venv, and
      * the staged engine (with its 2.4 GB checkpoint).
      *

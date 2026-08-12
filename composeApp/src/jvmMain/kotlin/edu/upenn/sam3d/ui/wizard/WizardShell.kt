@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.unit.dp
+import edu.upenn.sam3d.BuildInfo
 import edu.upenn.sam3d.domain.model.AppView
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.state.PythonStatus
@@ -42,6 +43,7 @@ import edu.upenn.sam3d.ui.components.CarbonStatus
 import edu.upenn.sam3d.ui.components.CarbonStep
 import edu.upenn.sam3d.ui.components.CarbonStepStatus
 import edu.upenn.sam3d.ui.components.CarbonTag
+import edu.upenn.sam3d.ui.components.UpdateBanner
 import edu.upenn.sam3d.ui.theme.Carbon
 
 /**
@@ -62,6 +64,17 @@ fun WizardShellContent(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     Column(Modifier.fillMaxSize().background(Carbon.theme.background)) {
         Header(appView = state.appView, pythonStatus = state.pythonStatus, onIntent = onIntent)
         Box(Modifier.fillMaxWidth().height(1.dp).background(Carbon.theme.borderSubtle01))
+
+        // Directly under the header so it's visible from every step without stealing the content
+        // area. Nothing here blocks the workflow — the run in progress is always more important
+        // than the update.
+        state.pendingUpdate?.let { update ->
+            UpdateBanner(
+                update = update,
+                modifier = Modifier.fillMaxWidth().padding(Carbon.spacing.spacing05),
+                onDismiss = { onIntent(WizardIntent.DismissUpdate) },
+            )
+        }
 
         // Reports is a sibling of the whole wizard: full-width, no workflow rail or footer.
         if (state.appView == AppView.REPORTS) {
@@ -108,6 +121,10 @@ private fun Header(appView: AppView, pythonStatus: PythonStatus, onIntent: (Wiza
         Text("SAM3D", style = Carbon.type.headingCompact02, color = c.textPrimary)
         Spacer(Modifier.width(Carbon.spacing.spacing03))
         Text("DICOM → G-code", style = Carbon.type.label01, color = c.textHelper)
+        Spacer(Modifier.width(Carbon.spacing.spacing03))
+        // Always visible, so a bug report from the lab can say which build it came from without
+        // anyone having to go looking for it.
+        Text("v${BuildInfo.VERSION}", style = Carbon.type.label01, color = c.textHelper)
         Spacer(Modifier.width(Carbon.spacing.spacing07))
         // Global nav: switch between the run wizard and the run-history Reports tab. Always reachable
         // (including on Setup, where the workflow rail is hidden), so reports are never stranded.

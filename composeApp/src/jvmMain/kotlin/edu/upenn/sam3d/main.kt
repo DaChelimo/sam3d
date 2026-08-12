@@ -22,6 +22,7 @@ import androidx.compose.ui.window.rememberWindowState
 import edu.upenn.sam3d.dicom.Dcm4cheDownsampler
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.domain.usecase.SaveAnnotationsUseCase
+import edu.upenn.sam3d.process.GitHubUpdateChecker
 import edu.upenn.sam3d.process.PythonPipelineRunner
 import edu.upenn.sam3d.process.PythonProcessManager
 import edu.upenn.sam3d.process.RunReportStore
@@ -83,6 +84,7 @@ fun main() {
                 pipelineRunner = runner,
                 dicomDownsampler = Dcm4cheDownsampler(),
                 reportStore = RunReportStore(),
+                updateSource = GitHubUpdateChecker(),
             )
         }
         val uiState by viewModel.state.collectAsState()
