@@ -223,12 +223,21 @@ class EnvironmentSetupManager(
         }
     }
 
-    /** Run [cmd] merging stdout/stderr, streaming each line to [onLine] + the log; returns the exit code. */
+    /**
+     * Run [cmd] merging stdout/stderr, streaming each line to [onLine] + the log; returns the exit code.
+     *
+     * The [PythonEnv] variables matter most for the VERIFY stage, which decides whether setup passes.
+     * It probes the venv with `python -c "import <module>"`, and on Windows a module that merely
+     * *warns* with a non-ASCII character (a curly quote in a deprecation notice is enough) would die
+     * encoding that warning to a cp1252 pipe, exit non-zero, and be reported as missing — failing
+     * setup with "A Python dependency is missing" on an environment that is in fact complete.
+     */
     private suspend fun runProcess(cmd: List<String>, onLine: (String) -> Unit): Int {
-        val proc = ProcessBuilder(cmd)
+        val builder = ProcessBuilder(cmd)
             .directory(java.io.File(pipelineDir))
             .redirectErrorStream(true)
-            .start()
+        PythonEnv.apply(builder.environment())
+        val proc = builder.start()
         process = proc
         try {
             proc.inputStream.bufferedReader().use { reader ->
