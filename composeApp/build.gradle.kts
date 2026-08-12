@@ -106,7 +106,7 @@ compose.desktop {
             packageName = "SAM3D"
             // Must stay ahead of the newest published tag: Windows MSI upgrade logic keys off this,
             // and an installer numbered at or below the installed build can refuse to replace it.
-            packageVersion = "1.2.2"
+            packageVersion = "1.2.3"
             description = "DICOM → G-code: SAM3D scaffold tool-path generator"
             vendor = "University of Pennsylvania"
 
