@@ -89,16 +89,40 @@ class PythonProcessManager(
         "--datatype", AppConfig.PipelineDefaults.DATATYPE,
     )
 
+    /**
+     * Force the subprocess onto UTF-8 I/O and unbuffered stdout.
+     *
+     * `PYTHONIOENCODING`/`PYTHONUTF8` fix a hard Windows-only crash. When stdout is a pipe (which it
+     * always is here), CPython ≤3.14 encodes it with the ANSI code page — cp1252 on a US install —
+     * not UTF-8. sam3d.py:112 prints `f"Using device →  {device}"`, and U+2192 has no cp1252 mapping,
+     * so the run dies with `UnicodeEncodeError: 'charmap' codec can't encode character '→'`
+     * immediately after `parse_prompts`, seconds before SAM inference would have started. It works on
+     * macOS only because the locale there is already UTF-8. The engine is vendored read-only, so the
+     * fix lives here — and being an env var it covers every other non-ASCII byte the engine or its
+     * dependencies might print, not just this one arrow.
+     *
+     * `PYTHONUNBUFFERED` is not about the crash: block-buffered stdout holds print() output in an 8 KB
+     * buffer, which starves [StdoutProgressParser] of stage transitions and reorders logs (a traceback
+     * on stderr lands *before* the stdout lines that led to it). tqdm already writes unbuffered to
+     * stderr, which is why the progress bar looked live while the stage labels lagged.
+     */
+    internal fun applyEnvironment(env: MutableMap<String, String>) {
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+    }
+
     fun start(dicomPath: Path, outputDir: Path): Job {
         cancelled = false
         timedOut = false
         return scope.launch {
             clearStaleIntermediates(outputDir)
             val cmd = buildCommand(dicomPath, outputDir)
-            val proc = ProcessBuilder(cmd)
+            val builder = ProcessBuilder(cmd)
                 .directory(workingDir.toFile())   // CRITICAL: relative paths in sam3d.py need this
                 .redirectErrorStream(true)
-                .start()
+            applyEnvironment(builder.environment())
+            val proc = builder.start()
             process = proc
             val runStartMs = System.currentTimeMillis()
             lastActivityAt = runStartMs

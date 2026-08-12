@@ -35,6 +35,20 @@ class PythonProcessManagerTest {
     }
 
     /**
+     * sam3d.py:112 prints a U+2192 arrow. With stdout on a pipe, Windows CPython encodes it with the
+     * ANSI code page (cp1252), which has no mapping for it — the run dies with UnicodeEncodeError
+     * right after parse_prompts. The engine is read-only, so the launcher must force UTF-8.
+     */
+    @Test
+    fun `subprocess env forces UTF-8 io so a non-ASCII print cannot kill the run on Windows`() {
+        val env = HashMap<String, String>()
+        PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser()).applyEnvironment(env)
+        assertEquals("utf-8", env["PYTHONIOENCODING"], "sam3d.py:112 prints '→' — cp1252 would throw")
+        assertEquals("1", env["PYTHONUTF8"])
+        assertEquals("1", env["PYTHONUNBUFFERED"], "block-buffered stdout starves the progress parser")
+    }
+
+    /**
      * sam3d.py clears its own intermediates with `os.system('rm -r …')`, which does nothing on
      * Windows — so `os.makedirs` then raises FileExistsError and the *second* run into an output
      * folder dies after inference has already completed. We guarantee the precondition instead.
