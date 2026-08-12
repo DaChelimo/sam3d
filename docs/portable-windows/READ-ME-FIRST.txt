@@ -55,6 +55,32 @@ BEFORE YOU START A REAL RUN
   a scheduled restart or someone logging you out.
 
 
+UPDATING TO A NEWER VERSION
+---------------------------
+
+You do NOT have to download the 2.4 GB model again. Ever.
+
+The app itself and the things it downloaded live in two different places.
+Updating replaces only the first:
+
+    the SAM3D folder you unzipped   <- replaced (about 200 MB)
+    %LOCALAPPDATA%\SAM3D            <- untouched (the model, Python, your
+                                       settings and run history)
+
+To update:
+
+1. Close SAM3D.
+2. Delete or rename the old SAM3D folder.
+3. Unzip the new one in its place.
+4. Start it. Setup will already be done — if you click "Set up environment"
+   again it just re-checks what's there and finishes in seconds.
+
+The app tells you when a new version exists: a bar appears under the title
+with a "Get the update" button. The version you're running is always shown
+at the top of the window, next to "DICOM -> G-code" — please include it when
+you report a problem.
+
+
 IF SOMETHING GOES WRONG
 -----------------------
 

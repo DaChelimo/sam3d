@@ -289,6 +289,17 @@ jobs:
             Windows will warn that the app is unsigned ("Windows protected your PC") — choose
             **More info → Run anyway**. The portable zip includes a `READ-ME-FIRST.txt` covering this.
 
+            ### Already have SAM3D? Updating does not re-download the model
+
+            The app and the things it downloads live in different places, and an update replaces only
+            the app (~200 MB). The 2.4 GB checkpoint, the Python environment, your settings and your
+            run history all live in your user data folder (`%LOCALAPPDATA%\SAM3D` on Windows,
+            `~/Library/Application Support/SAM3D` on macOS) and are left alone.
+
+            Portable zip: close the app, replace the unzipped `SAM3D` folder, start it again.
+            Installers: just run the new one. Either way, first launch is ready to go — "Set up
+            environment" re-verifies what's already there in seconds if you click it.
+
             Start with the **Draft** quality preset to check the workflow end to end; **Production**
             can run overnight on a machine without an NVIDIA GPU.
 
