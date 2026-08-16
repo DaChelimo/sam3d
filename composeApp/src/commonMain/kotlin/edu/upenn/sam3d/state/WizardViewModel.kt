@@ -12,6 +12,7 @@ import edu.upenn.sam3d.domain.repository.RunReportRepository
 import edu.upenn.sam3d.domain.usecase.AnnotationSaver
 import edu.upenn.sam3d.domain.usecase.DicomDownsampler
 import edu.upenn.sam3d.domain.usecase.PipelineRunner
+import edu.upenn.sam3d.domain.usecase.UpdateSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +35,7 @@ class WizardViewModel(
     private val pipelineRunner: PipelineRunner? = null,
     private val dicomDownsampler: DicomDownsampler? = null,
     private val reportStore: RunReportRepository? = null,
+    private val updateSource: UpdateSource? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val _state = MutableStateFlow(WizardState())
@@ -48,6 +50,15 @@ class WizardViewModel(
     private var pendingNewPolyline = true
 
     init {
+        // One update check per launch, fire-and-forget. UpdateSource swallows its own failures, so an
+        // offline lab machine just leaves this at Unknown and nothing is shown.
+        updateSource?.let { source ->
+            scope.launch {
+                val status = source.check()
+                _state.update { it.copy(update = status) }
+            }
+        }
+
         // Reflect sam3d.py progress into state: auto-advance to DONE on COMPLETE, raise the error
         // dialog (last log lines) on ERROR (§ STEP 7).
         val runner = pipelineRunner
@@ -68,10 +79,10 @@ class WizardViewModel(
                             _state.update {
                                 it.copy(
                                     error = PipelineError.Server(
-                                        code = 1,
+                                        code = progress.exitCode ?: 1,
                                         body = out,
                                         logPath = runner.logPath(),
-                                        hint = FailureHints.classify(out),
+                                        hint = FailureHints.classify(out, progress.exitCode),
                                     )
                                 )
                             }
@@ -143,6 +154,19 @@ class WizardViewModel(
 
             WizardIntent.CancelCheckpointDownload ->
                 _state.update { it.copy(checkpointDownload = CheckpointDownload.Idle) }
+
+            is WizardIntent.SetEnvSetup ->
+                _state.update {
+                    // On success the checkpoint is definitely present; flip the gate signal here. The
+                    // Start screen also sets pythonPath→the venv (auto-verifies to VERIFIED) + persists.
+                    it.copy(
+                        envSetup = intent.status,
+                        checkpointExists = if (intent.status is EnvSetup.Succeeded) true else it.checkpointExists,
+                    )
+                }
+
+            WizardIntent.CancelEnvSetup ->
+                _state.update { it.copy(envSetup = EnvSetup.Idle) }
 
             WizardIntent.ProceedToPrompting ->
                 _state.update { it.copy(currentStep = WizardStep.PROMPTING) }
@@ -228,6 +252,8 @@ class WizardViewModel(
                 // Opening Reports pulls the latest from disk (a prior run may have appended since).
                 if (intent.view == AppView.REPORTS) refreshReports()
             }
+
+            is WizardIntent.DismissUpdate -> _state.update { it.copy(updateDismissed = true) }
         }
     }
 

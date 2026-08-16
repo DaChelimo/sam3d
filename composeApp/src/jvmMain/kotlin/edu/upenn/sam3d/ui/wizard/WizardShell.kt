@@ -21,12 +21,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.unit.dp
+import edu.upenn.sam3d.BuildInfo
 import edu.upenn.sam3d.domain.model.AppView
 import edu.upenn.sam3d.domain.model.WizardStep
 import edu.upenn.sam3d.state.PythonStatus
@@ -42,6 +45,7 @@ import edu.upenn.sam3d.ui.components.CarbonStatus
 import edu.upenn.sam3d.ui.components.CarbonStep
 import edu.upenn.sam3d.ui.components.CarbonStepStatus
 import edu.upenn.sam3d.ui.components.CarbonTag
+import edu.upenn.sam3d.ui.components.UpdateBanner
 import edu.upenn.sam3d.ui.theme.Carbon
 
 /**
@@ -62,6 +66,17 @@ fun WizardShellContent(state: WizardState, onIntent: (WizardIntent) -> Unit) {
     Column(Modifier.fillMaxSize().background(Carbon.theme.background)) {
         Header(appView = state.appView, pythonStatus = state.pythonStatus, onIntent = onIntent)
         Box(Modifier.fillMaxWidth().height(1.dp).background(Carbon.theme.borderSubtle01))
+
+        // Directly under the header so it's visible from every step without stealing the content
+        // area. Nothing here blocks the workflow — the run in progress is always more important
+        // than the update.
+        state.pendingUpdate?.let { update ->
+            UpdateBanner(
+                update = update,
+                modifier = Modifier.fillMaxWidth().padding(Carbon.spacing.spacing05),
+                onDismiss = { onIntent(WizardIntent.DismissUpdate) },
+            )
+        }
 
         // Reports is a sibling of the whole wizard: full-width, no workflow rail or footer.
         if (state.appView == AppView.REPORTS) {
@@ -108,6 +123,10 @@ private fun Header(appView: AppView, pythonStatus: PythonStatus, onIntent: (Wiza
         Text("SAM3D", style = Carbon.type.headingCompact02, color = c.textPrimary)
         Spacer(Modifier.width(Carbon.spacing.spacing03))
         Text("DICOM → G-code", style = Carbon.type.label01, color = c.textHelper)
+        Spacer(Modifier.width(Carbon.spacing.spacing03))
+        // Always visible, so a bug report from the lab can say which build it came from without
+        // anyone having to go looking for it.
+        Text("v${BuildInfo.VERSION}", style = Carbon.type.label01, color = c.textHelper)
         Spacer(Modifier.width(Carbon.spacing.spacing07))
         // Global nav: switch between the run wizard and the run-history Reports tab. Always reachable
         // (including on Setup, where the workflow rail is hidden), so reports are never stranded.
@@ -122,8 +141,21 @@ private fun Header(appView: AppView, pythonStatus: PythonStatus, onIntent: (Wiza
 @Composable
 private fun HeaderTab(label: String, selected: Boolean, onClick: () -> Unit) {
     val c = Carbon.theme
+    val indicator = c.interactive
     Box(
         modifier = Modifier.fillMaxHeight().clickable(onClick = onClick).pointerHoverIcon(PointerIcon.Hand)
+            // Drawn, not laid out. As a child Box it would need fillMaxWidth(), which resolves against
+            // the Row's *remaining* width — stretching the selected tab across the whole header and
+            // pushing the other tab and the status tag out of the layout entirely.
+            .drawBehind {
+                if (!selected) return@drawBehind
+                val thickness = 2.dp.toPx()
+                drawRect(
+                    color = indicator,
+                    topLeft = Offset(0f, size.height - thickness),
+                    size = Size(size.width, thickness),
+                )
+            }
             .padding(horizontal = Carbon.spacing.spacing05),
         contentAlignment = Alignment.Center,
     ) {
@@ -132,9 +164,6 @@ private fun HeaderTab(label: String, selected: Boolean, onClick: () -> Unit) {
             style = Carbon.type.headingCompact01,
             color = if (selected) c.textPrimary else c.textSecondary,
         )
-        if (selected) {
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp).background(c.interactive))
-        }
     }
 }
 
@@ -151,7 +180,7 @@ private fun AppMark() {
             val s = Stroke(width = 1.4f, cap = StrokeCap.Round)
             val col = androidx.compose.ui.graphics.Color.White
             // front face
-            drawRect(color = col, topLeft = Offset(0f, d), size = androidx.compose.ui.geometry.Size(w - d, h - d), style = s)
+            drawRect(color = col, topLeft = Offset(0f, d), size = Size(w - d, h - d), style = s)
             // top edges
             drawLine(col, Offset(0f, d), Offset(d, 0f), 1.4f, StrokeCap.Round)
             drawLine(col, Offset(w - d, d), Offset(w, 0f), 1.4f, StrokeCap.Round)
@@ -263,12 +292,17 @@ private fun Footer(state: WizardState, isNextEnabled: Boolean, onIntent: (Wizard
 private fun blockerHint(state: WizardState, enabled: Boolean): String? {
     if (enabled || state.currentStep != WizardStep.START) return null
     return when {
-        state.sam3dGcodeDir.isNullOrBlank() -> "Set the SAM3D-GCODE directory to continue"
+        state.sam3dGcodeDir.isNullOrBlank() -> "Choose the pipeline engine folder to continue"
         state.dicomFolderPath.isNullOrBlank() -> "Choose a DICOM folder to continue"
         state.outputFolderPath.isNullOrBlank() -> "Choose an output folder to continue"
-        state.pythonStatus != PythonStatus.VERIFIED -> "Verify the Python environment to continue"
+        // Both of these are the job of the one-click setup, not something the user does by hand —
+        // so name that button rather than describing the missing artefact. ("Verify the Python
+        // environment" read as an instruction nobody could act on, moments after the app promised
+        // to manage Python itself.)
+        state.envSetup.isActive -> "Setting up the environment…"
+        state.pythonStatus != PythonStatus.VERIFIED || !state.checkpointExists ->
+            "Click \"Set up environment\" below to continue"
         state.checkpointDownload.isActive -> "Downloading the SAM checkpoint…"
-        !state.checkpointExists -> "Download the SAM checkpoint to continue"
         else -> null
     }
 }

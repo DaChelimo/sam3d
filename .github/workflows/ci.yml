@@ -6,6 +6,15 @@ on:
     tags: ["v*"]
   pull_request:
     branches: ["**"]
+  # Manual trigger: builds all four downloads and refreshes the rolling `latest-build` prerelease,
+  # so a current, working installer is always available without cutting a version tag.
+  # Actions → CI → Run workflow.
+  workflow_dispatch:
+  # Weekly, so the environment-setup smoke test catches upstream drift (a new uv, a moved
+  # segment-anything branch, a dependency that stops publishing Windows wheels) even in a quiet week.
+  # Those break users without any commit of ours being involved.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
 
 permissions:
   contents: read
@@ -48,26 +57,26 @@ jobs:
           path: composeApp/build/reports/tests/
           if-no-files-found: ignore
 
-  # Build a native distribution per OS, but only on a version tag (v*). Codesigning/notarization is
-  # intentionally not wired here yet — see docs/PACKAGING.md (deferred to release prep).
-  package:
-    name: Package (${{ matrix.os }})
+  # Actually build the Python environment on Windows, the way a user's first launch does: download
+  # uv, install a managed CPython, create the venv, install the engine's dependencies, and import
+  # every module the engine imports. Only the 2.4 GB checkpoint is stubbed.
+  #
+  # This is the only job that exercises what we don't control — uv's release assets, PyPI wheel
+  # availability for CPython 3.11 on Windows, the git-free segment-anything archive URL, and whether
+  # the managed Python ships tkinter (which the engine imports and pip cannot supply). Those break on
+  # upstream's schedule, not ours, which is why this also runs weekly on a cron.
+  #
+  # Not run on every push: ~10-15 min and a few GB of downloads per run.
+  env-setup-smoke-windows:
+    name: Environment setup smoke test (Windows)
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            task: packageDmg
-            path: composeApp/build/compose/binaries/main/dmg/*.dmg
-          - os: windows-latest
-            task: packageMsi
-            path: composeApp/build/compose/binaries/main/msi/*.msi
-          - os: ubuntu-latest
-            task: packageDeb
-            path: composeApp/build/compose/binaries/main/deb/*.deb
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -78,13 +87,220 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Build distribution
+      # The setup flow refuses to start below 8 GB free (AppConfig.MIN_FREE_BYTES_FOR_SETUP), so a
+      # cramped runner would fail as a disk error rather than a real regression. Show it up front.
+      - name: Report free disk space
+        shell: pwsh
+        run: Get-PSDrive C | Select-Object Used, Free
+
+      - name: Run the environment setup end to end
+        shell: bash
+        env:
+          SAM3D_ENV_SMOKE: "true"
+        run: ./gradlew :composeApp:jvmTest --tests "edu.upenn.sam3d.EnvironmentSetupSmokeTest" --stacktrace
+
+      - name: Upload setup logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env-setup-smoke-logs
+          path: composeApp/build/reports/tests/
+          if-no-files-found: ignore
+
+  # Build a native distribution per OS, but only on a version tag (v*).
+  # Each installer bundles a full JRE — users need no Java installed.
+  # Codesigning/notarization is intentionally not wired here yet — see docs/PACKAGING.md.
+  package:
+    name: Package (${{ matrix.os }})
+    needs: test
+    # Tags cut a versioned release; workflow_dispatch builds the same installers on demand so a
+    # working download always exists without having to bump a version first.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            task: packageDmg
+            path: composeApp/build/compose/binaries/main/dmg/*.dmg
+            artifact: sam3d-macos
+          - os: windows-latest
+            task: packageMsi
+            path: composeApp/build/compose/binaries/main/msi/*.msi
+            artifact: sam3d-windows
+          - os: ubuntu-latest
+            task: packageDeb
+            path: composeApp/build/compose/binaries/main/deb/*.deb
+            artifact: sam3d-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # Built as its own step so the app image exists on disk for the check below, before the
+      # installer wraps it up. The packaging task reuses this output rather than rebuilding.
+      - name: Build the app image
+        shell: bash
+        run: ./gradlew :composeApp:createDistributable --stacktrace
+
+      # The installed app must contain the Python engine. Staging it is a Copy task, and a Copy over
+      # a missing source directory succeeds silently — which would ship the engine-less installer
+      # this release exists to fix. Checked on every OS; the image layout differs per platform, so
+      # search for the file rather than hardcoding a path.
+      - name: Verify the engine is bundled
+        shell: bash
+        run: |
+          root=composeApp/build/compose/binaries/main/app
+          for f in sam3d.py requirements.txt; do
+            hit=$(find "$root" -name "$f" -print -quit)
+            [ -n "$hit" ] || { echo "::error::$f is missing from the app image — the installer would dead-end on the user's machine"; exit 1; }
+            echo "  ok: $hit"
+          done
+
+      - name: Build installer
         shell: bash
         run: ./gradlew :composeApp:${{ matrix.task }} --stacktrace
 
-      - name: Upload installer
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sam3d-${{ matrix.os }}
+          name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+
+  # Portable Windows build: the unpacked app image (createDistributable), zipped.
+  # Unlike the .msi this needs NO installer and NO admin rights — the lab user
+  # unzips the folder and double-clicks SAM3D.exe. The JRE is bundled inside
+  # SAM3D/runtime/, so no system-wide Java is required or registered.
+  # Runs on a tag (published with the release) or on manual workflow_dispatch.
+  package-portable-windows:
+    name: Package portable Windows (no installer)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Build unpacked app image
+        shell: bash
+        run: ./gradlew :composeApp:createDistributable --stacktrace
+
+      # The bundled Python engine must be inside the image — without it the app can't run the
+      # pipeline and the Setup screen has nothing to install. Fail the build here rather than
+      # shipping a zip that dead-ends on the user's machine (which is exactly what happened once).
+      - name: Verify the engine is bundled
+        shell: pwsh
+        run: |
+          $engine = "composeApp/build/compose/binaries/main/app/SAM3D/app/resources/engine"
+          foreach ($f in @("sam3d.py", "requirements.txt")) {
+            if (-not (Test-Path "$engine/$f")) { throw "Engine file missing from the app image: $f" }
+          }
+          Write-Host "Engine bundled OK ($((Get-ChildItem $engine).Count) files)"
+
+      - name: Add the first-run instructions
+        shell: pwsh
+        # Sits next to SAM3D.exe: covers the SmartScreen prompt, the "don't run it from inside the
+        # zip" trap, and where the setup log lives.
+        run: Copy-Item docs/portable-windows/READ-ME-FIRST.txt composeApp/build/compose/binaries/main/app/SAM3D/
+
+      - name: Zip app image
+        shell: pwsh
+        # Compress the SAM3D folder itself so unzipping yields SAM3D/SAM3D.exe.
+        run: Compress-Archive -Path composeApp/build/compose/binaries/main/app/SAM3D -DestinationPath SAM3D-windows-portable.zip
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam3d-windows-portable
+          path: SAM3D-windows-portable.zip
+          if-no-files-found: error
+
+  # Collect all three installers and publish them as a GitHub Release.
+  # Users download the file for their OS — no Java installation required.
+  # Publishes the downloads. Two modes, one job:
+  #
+  #  - a `v*` tag  → a normal versioned release, marked latest.
+  #  - workflow_dispatch → updates the rolling `latest-build` prerelease in place, so there is always
+  #    a current download at a stable URL without having to cut a version. This is what you send
+  #    someone who just needs the app working today.
+  release:
+    name: Publish download
+    needs: [package, package-portable-windows]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Collect every installer
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sam3d-*
+          path: release/
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -lh release/
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          # Tag builds keep their version; manual builds overwrite the rolling prerelease.
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest-build' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Latest build' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          body: |
+            Built from `${{ github.sha }}` on ${{ github.ref_name }}.
+
+            ## Installation — nothing to install first
+
+            Every download is self-contained: it bundles its own Java runtime **and** the Python
+            pipeline engine. You do not need Java, Python, conda, or Git on the machine.
+
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | macOS    | `.dmg` | Open the DMG and drag SAM3D to Applications |
+            | Windows  | `.msi` | Run the installer wizard (needs admin rights) |
+            | Windows (portable) | `SAM3D-windows-portable.zip` | **No installer, no admin** — unzip and run `SAM3D\SAM3D.exe` |
+            | Linux    | `.deb` | `sudo dpkg -i sam3d_*.deb` |
+
+            ### First launch
+
+            Open the app and click **Set up environment** once. It installs a private Python, the
+            pipeline's dependencies, and the ~2.4 GB SAM model checkpoint into your own user folder —
+            with a progress bar, and it resumes if interrupted. Budget **~8 GB of free disk** and an
+            internet connection that can reach `github.com` and `dl.fbaipublicfiles.com`.
+
+            Windows will warn that the app is unsigned ("Windows protected your PC") — choose
+            **More info → Run anyway**. The portable zip includes a `READ-ME-FIRST.txt` covering this.
+
+            ### Already have SAM3D? Updating does not re-download the model
+
+            The app and the things it downloads live in different places, and an update replaces only
+            the app (~200 MB). The 2.4 GB checkpoint, the Python environment, your settings and your
+            run history all live in your user data folder (`%LOCALAPPDATA%\SAM3D` on Windows,
+            `~/Library/Application Support/SAM3D` on macOS) and are left alone.
+
+            Portable zip: close the app, replace the unzipped `SAM3D` folder, start it again.
+            Installers: just run the new one. Either way, first launch is ready to go — "Set up
+            environment" re-verifies what's already there in seconds if you click it.
+
+            Start with the **Draft** quality preset to check the workflow end to end; **Production**
+            can run overnight on a machine without an NVIDIA GPU.
+
+            See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for details.

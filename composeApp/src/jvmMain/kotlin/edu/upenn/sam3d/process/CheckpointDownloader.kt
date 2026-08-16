@@ -15,21 +15,27 @@ import java.net.URL
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import kotlin.coroutines.coroutineContext
 
 /**
- * Streams the 2.4 GB SAM ViT-H checkpoint straight to disk with true byte-level progress.
+ * Streams the 2.4 GB SAM ViT-H checkpoint straight to disk with true byte-level progress, and — as of
+ * the one-click environment setup — **resumes** an interrupted download instead of restarting.
  *
  * Why native HTTP and not `python download_checkpoint.py` (as the original plan sketched): that engine
  * script uses `urllib.urlretrieve` with **no** progress output, so there is nothing to parse for a
  * live percentage — and the engine is read-only, so we can't add a tqdm hook. Doing the GET here
  * gives an exact `received / Content-Length` fraction, clean cancellation, and zero Python dependency.
  *
- * Mirrors [PythonProcessManager]'s shape: a [StateFlow] of progress plus [start]/[cancel]. The file is
- * written to `<name>.part` and atomically moved into place only on success, so a cancelled or failed
- * download never leaves a truncated checkpoint that would later be mistaken for a valid one.
+ * The file is written to `<name>.part` and atomically moved into place only on success. On cancel or
+ * failure the `.part` is **kept** so a later run can resume via an HTTP `Range` request (if the CDN
+ * answers `206`; a `200` means Range was ignored, so we truncate and start over). This class exposes
+ * both a fire-and-forget [start]/[cancel] + [StateFlow] API (standalone use) and a suspend [download]
+ * core that [EnvironmentSetupManager] awaits as one stage of the combined setup.
  */
-class CheckpointDownloader(
+// `open` purely as a test seam: EnvironmentSetupSmokeTest exercises the real setup flow end to end on
+// CI and substitutes this one stage, because a 2.4 GB download per run would make the job unusable.
+open class CheckpointDownloader(
     private val url: String = SAM_VIT_H_URL,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
@@ -44,7 +50,11 @@ class CheckpointDownloader(
         cancel()
         _state.value = CheckpointDownload.Connecting
         job = scope.launch {
-            runCatching { download(Path.of(sam3dGcodeDir, *CHECKPOINT_REL)) }
+            runCatching {
+                download(Path.of(sam3dGcodeDir, *CHECKPOINT_REL)) { received, total ->
+                    _state.value = CheckpointDownload.InProgress(received, total)
+                }
+            }
                 .onSuccess { _state.value = CheckpointDownload.Succeeded }
                 .onFailure { e ->
                     // A cancellation is a user action, not an error — fall back to Idle quietly.
@@ -63,25 +73,61 @@ class CheckpointDownloader(
         if (_state.value.isActive) _state.value = CheckpointDownload.Idle
     }
 
-    private suspend fun download(dest: Path) {
+    /**
+     * Resumable GET of the checkpoint into [dest], reporting `(received, total)` as it streams (total is
+     * null when the server sends no length). Cooperatively cancellable. Reused by [start] and by the
+     * combined environment setup. Leaves the `.part` behind on interruption so the next call resumes.
+     */
+    open suspend fun download(dest: Path, onProgress: (Long, Long?) -> Unit = { _, _ -> }) {
         if (Files.exists(dest)) return // already present → treat as success
         Files.createDirectories(dest.parent)
         val part = dest.resolveSibling("${dest.fileName}.part")
+        try {
+            attempt(part, dest, allowResume = true, onProgress = onProgress)
+        } catch (_: RangeNotSatisfiable) {
+            // Our `.part` is stale/complete-but-too-long for the server's file; discard and restart.
+            runCatching { Files.deleteIfExists(part) }
+            attempt(part, dest, allowResume = false, onProgress = onProgress)
+        }
+    }
+
+    private class RangeNotSatisfiable : Exception()
+
+    private suspend fun attempt(part: Path, dest: Path, allowResume: Boolean, onProgress: (Long, Long?) -> Unit) {
+        val existing = if (allowResume && Files.exists(part)) Files.size(part) else 0L
 
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 30_000
             readTimeout = 60_000
+            if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
         }
         connection = conn
         try {
-            val total = conn.contentLengthLong.takeIf { it > 0 }
+            val code = conn.responseCode
+            if (code == 416) throw RangeNotSatisfiable()  // Range Not Satisfiable → caller restarts fresh
+            // Anything else outside 2xx is a real failure — a proxy login page, a blocked host, or a
+            // moved asset. Fail with the status instead of letting the stream error out mid-write.
+            if (code !in 200..299) error("HTTP $code from ${conn.url.host}")
+            val resuming = existing > 0 && code == HttpURLConnection.HTTP_PARTIAL  // 206: server honoured Range
+            val remaining = conn.contentLengthLong.takeIf { it > 0 }
+            val total: Long? = if (resuming)
+                parseContentRangeTotal(conn.getHeaderField("Content-Range")) ?: remaining?.let { existing + it }
+            else remaining
+
+            // 206 → append after what we already have; anything else (incl. a 200 that ignored Range) →
+            // truncate and write from zero so we never concatenate onto a stale prefix.
+            val openOptions = if (resuming)
+                arrayOf(StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+            else
+                arrayOf(StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
+
+            var received = if (resuming) existing else 0L
+            var lastEmitted = received
+            onProgress(received, total)
             conn.inputStream.use { input ->
-                Files.newOutputStream(part).use { out ->
+                Files.newOutputStream(part, *openOptions).use { out ->
                     val buf = ByteArray(1 shl 16)
-                    var received = 0L
-                    var lastEmitted = 0L
-                    _state.value = CheckpointDownload.InProgress(0, total)
                     while (true) {
                         coroutineContext.ensureActive()  // cooperative cancellation between reads
                         val n = input.read(buf)
@@ -90,17 +136,16 @@ class CheckpointDownloader(
                         received += n
                         // Throttle UI updates to ~every 2 MB so the flow isn't spammed.
                         if (received - lastEmitted >= 2_000_000L) {
-                            _state.value = CheckpointDownload.InProgress(received, total)
+                            onProgress(received, total)
                             lastEmitted = received
                         }
                     }
                 }
             }
             Files.move(part, dest, StandardCopyOption.REPLACE_EXISTING)
-        } catch (t: Throwable) {
-            runCatching { Files.deleteIfExists(part) } // never leave a partial file behind
-            throw t
         } finally {
+            // NOTE: the `.part` is intentionally NOT deleted on failure/cancel — that's what lets the
+            // next run resume from where this one stopped.
             runCatching { conn.disconnect() }
             connection = null
         }
@@ -111,5 +156,11 @@ class CheckpointDownloader(
             "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
         /** Relative to the SAM3D-GCODE dir; matches AppConfig.PipelineDefaults.CHECKPOINT. */
         val CHECKPOINT_REL = arrayOf("checkpoints", "sam_vit_h_4b8939.pth")
+
+        /** Extract the total size from a `Content-Range: bytes 200-1023/1024` header → 1024. Null if absent. */
+        fun parseContentRangeTotal(header: String?): Long? {
+            val slash = header?.substringAfterLast('/', "") ?: return null
+            return slash.toLongOrNull()
+        }
     }
 }

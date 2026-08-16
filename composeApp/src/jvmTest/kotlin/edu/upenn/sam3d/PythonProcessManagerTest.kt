@@ -17,6 +17,12 @@ class PythonProcessManagerTest {
     // Use /bin/sh as the "python" interpreter — shell scripts ignore unknown CLI flags.
     private val sh = Path.of("/bin/sh")
 
+    // Process-spawning tests use /bin/sh and only run on Unix.
+    private fun assumeUnix() = org.junit.Assume.assumeTrue(
+        "Test requires /bin/sh — skipped on Windows",
+        !System.getProperty("os.name", "").contains("Windows", ignoreCase = true),
+    )
+
     @Test
     fun `command omits -v (would UnboundLocalError in sam3d_py) and sets the core flags`() {
         val manager = PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser())
@@ -28,8 +34,44 @@ class PythonProcessManagerTest {
         )
     }
 
+    /**
+     * sam3d.py clears its own intermediates with `os.system('rm -r …')`, which does nothing on
+     * Windows — so `os.makedirs` then raises FileExistsError and the *second* run into an output
+     * folder dies after inference has already completed. We guarantee the precondition instead.
+     */
+    @Test
+    fun `a stale temp folder from a previous run is cleared before launching`() {
+        val outputDir = java.nio.file.Files.createTempDirectory("sam3d-out")
+        try {
+            val stale = outputDir.resolve("temp/segmentation_mask")
+            java.nio.file.Files.createDirectories(stale)
+            java.nio.file.Files.writeString(stale.resolve("leftover.dcm"), "from the last run")
+            val keep = outputDir.resolve("output.gcode")
+            java.nio.file.Files.writeString(keep, "G1 X0 Y0")
+
+            PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser()).clearStaleIntermediates(outputDir)
+
+            assertFalse(java.nio.file.Files.exists(outputDir.resolve("temp")), "temp/ must be gone")
+            assertTrue(java.nio.file.Files.exists(keep), "only temp/ is cleared — real results are left alone")
+        } finally {
+            outputDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `clearing intermediates is a no-op on a fresh output folder`() {
+        val outputDir = java.nio.file.Files.createTempDirectory("sam3d-out")
+        try {
+            PythonProcessManager(sh, sh, sh.parent, StdoutProgressParser()).clearStaleIntermediates(outputDir)
+            assertTrue(java.nio.file.Files.isDirectory(outputDir))
+        } finally {
+            outputDir.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun `exit code 0 emits COMPLETE stage`() = runBlocking {
+        assumeUnix()
         val script = shellScript("exit 0")
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -43,6 +85,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `non-zero exit code emits ERROR stage`() = runBlocking {
+        assumeUnix()
         val script = shellScript("exit 1")
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -56,6 +99,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `a silent (no-output) run is killed by the inactivity watchdog and emits ERROR`() = runBlocking {
+        assumeUnix()
         val script = shellScript("sleep 30")   // emits nothing → trips the inactivity timer
         val manager = PythonProcessManager(
             pythonExe = sh,
@@ -74,6 +118,7 @@ class PythonProcessManagerTest {
 
     @Test
     fun `a run that keeps emitting output is NOT killed by the inactivity watchdog`() = runBlocking {
+        assumeUnix()
         // Prints a line every 0.1s for ~1s — well past the 400ms inactivity window, but never idle.
         val script = shellScript("for i in 1 2 3 4 5 6 7 8 9 10; do echo line\$i; sleep 0.1; done; exit 0")
         val manager = PythonProcessManager(
@@ -86,6 +131,37 @@ class PythonProcessManagerTest {
         manager.start(dicomPath = script.parent, outputDir = script.parent).join()
         assertEquals(PipelineStage.COMPLETE, manager.progress.value?.stage,
             "a steadily-progressing run must survive the inactivity watchdog")
+    }
+
+    @Test
+    fun `a process killed out from under us is detected promptly, not just via the inactivity timeout`() = runBlocking {
+        assumeUnix()
+        // Reproduces what was observed on a real Production run killed by the OS under memory
+        // pressure: `proc.isAlive` goes false, but a still-alive descendant (here, a background job
+        // that duplicated the stdout fd) keeps the pipe's write end open, so a plain blocking read
+        // would never see EOF on its own. inactivityMs is set much higher than the ~200ms self-kill so
+        // a pass here proves detection comes from the isAlive-polling watchdog, not the slow fallback.
+        val script = shellScript("exec 3>&1\n(sleep 10 >&3) &\nsleep 0.2\nkill -9 \$\$\n")
+        val manager = PythonProcessManager(
+            pythonExe = sh,
+            sam3dScript = script,
+            workingDir = script.parent,
+            parser = StdoutProgressParser(),
+            inactivityMs = 20_000L,
+        )
+        val start = System.currentTimeMillis()
+        manager.start(dicomPath = script.parent, outputDir = script.parent).join()
+        val elapsed = System.currentTimeMillis() - start
+        assertEquals(PipelineStage.ERROR, manager.progress.value?.stage)
+        assertTrue(
+            // Watchdog tick here is inactivityMs / 4 = 5_000ms. Worst case the process dies just
+            // after a tick fires, so detection needs a second tick before isAlive goes false —
+            // up to 2 * 5_000 = 10_000ms — plus scheduling slack on a loaded CI runner.
+            elapsed < 13_000,
+            "should detect the dead process via isAlive polling well before the lingering fd's 10s " +
+                "hold or the 20s inactivity timeout (took ${elapsed}ms)",
+        )
+        assertEquals(137, manager.progress.value?.exitCode, "SIGKILL should report as exit code 137")
     }
 
     private fun shellScript(body: String): Path {

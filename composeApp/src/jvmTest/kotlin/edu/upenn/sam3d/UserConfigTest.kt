@@ -68,8 +68,12 @@ class UserConfigTest {
         val text = javaClass.getResourceAsStream("/config.default.json")!!
             .bufferedReader().use { it.readText() }
         val c = json.decodeFromString<UserConfig>(text)
-        assertEquals("python3", c.pythonPath)
         assertEquals(256, c.maxCachedBitmaps)
         assertNull(c.sam3dGcodeDir, "the bundled template must not hardcode machine paths (§11.3)")
+        assertNull(
+            c.pythonPath,
+            "the template must not pin an interpreter: `python3` resolves to the Microsoft Store " +
+                "alias on Windows, so AppConfig picks the default per-platform instead",
+        )
     }
 }

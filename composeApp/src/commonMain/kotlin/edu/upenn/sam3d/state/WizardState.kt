@@ -6,6 +6,7 @@ import edu.upenn.sam3d.domain.model.PipelineProgress
 import edu.upenn.sam3d.domain.model.QualityPreset
 import edu.upenn.sam3d.domain.model.RunReport
 import edu.upenn.sam3d.domain.model.SliceAnnotation
+import edu.upenn.sam3d.domain.model.UpdateStatus
 import edu.upenn.sam3d.domain.model.WizardStep
 
 enum class PythonStatus { UNCHECKED, CHECKING, VERIFIED, ERROR }
@@ -43,6 +44,9 @@ data class WizardState(
     val pythonStatus: PythonStatus = PythonStatus.UNCHECKED,
     val checkpointExists: Boolean = false,
     val checkpointDownload: CheckpointDownload = CheckpointDownload.Idle,
+    // The one-click environment setup (venv + deps + checkpoint) progress. Drives the Setup screen's
+    // combined banner; on Succeeded it flips pythonStatus→VERIFIED and checkpointExists→true.
+    val envSetup: EnvSetup = EnvSetup.Idle,
     // Setup quality choice (Draft vs Production). Drives BOTH the `-s` slice count and whether the
     // input is downsampled before annotation + the engine see it (§ pipeline-bottleneck fix).
     val quality: QualityPreset = QualityPreset.PRODUCTION,
@@ -62,4 +66,13 @@ data class WizardState(
     val lastRunReport: RunReport? = null,
     // All persisted runs, newest first — backs the Reports tab. Loaded lazily when it's opened.
     val reports: List<RunReport> = emptyList(),
-)
+    // Set once per launch by the update check; Unknown when offline or the check failed.
+    val update: UpdateStatus = UpdateStatus.Unknown,
+    // Dismissal is per-launch on purpose: it isn't persisted, so the reminder returns next time the
+    // app opens. An update the lab never applies should keep asking, quietly.
+    val updateDismissed: Boolean = false,
+) {
+    /** The banner shows only for a real newer release the user hasn't waved off this session. */
+    val pendingUpdate: UpdateStatus.Available?
+        get() = (update as? UpdateStatus.Available)?.takeUnless { updateDismissed }
+}

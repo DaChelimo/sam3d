@@ -8,6 +8,7 @@ local.properties
 
 # Log/OS Files
 *.log
+.DS_Store
 # …but keep committed test fixtures that happen to end in .log
 !composeApp/src/jvmTest/resources/fixtures/dry_run_annotated.log
 
@@ -34,3 +35,9 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Vendored Python pipeline (pipeline/) — runtime-generated artifacts, not source
+pipeline/checkpoints/
+pipeline/tempdir/
+pipeline/outputs/
+pipeline/__pycache__/

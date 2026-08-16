@@ -13,4 +13,9 @@ data class PipelineProgress(
     // Final per-stage + total timing, attached only to the terminal COMPLETE/ERROR emission by the
     // process layer. Null on every in-flight tick. The ViewModel turns it into a persisted RunReport.
     val timing: RunTiming? = null,
+    // The subprocess's real exit code, attached only to the terminal ERROR emission. On Unix a
+    // signal-terminated process reports 128+signal — notably 137 (128+SIGKILL), the reliable signature
+    // of the OS itself killing the process (almost always memory pressure), as opposed to a normal
+    // Python exception exit (small positive code). Used by FailureHints to give an accurate diagnosis.
+    val exitCode: Int? = null,
 )

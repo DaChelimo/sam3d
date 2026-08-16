@@ -1,0 +1,17 @@
+numpy
+scipy
+matplotlib
+opencv-python
+torch
+torchvision
+torchaudio
+tqdm
+pydicom
+SimpleITK
+nibabel
+Pillow
+mrcfile
+open3d
+fastkde
+git+https://github.com/facebookresearch/segment-anything.git
+pyinstaller
