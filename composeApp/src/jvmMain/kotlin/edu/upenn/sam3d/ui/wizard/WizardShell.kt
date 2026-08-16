@@ -21,7 +21,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -139,8 +141,21 @@ private fun Header(appView: AppView, pythonStatus: PythonStatus, onIntent: (Wiza
 @Composable
 private fun HeaderTab(label: String, selected: Boolean, onClick: () -> Unit) {
     val c = Carbon.theme
+    val indicator = c.interactive
     Box(
         modifier = Modifier.fillMaxHeight().clickable(onClick = onClick).pointerHoverIcon(PointerIcon.Hand)
+            // Drawn, not laid out. As a child Box it would need fillMaxWidth(), which resolves against
+            // the Row's *remaining* width — stretching the selected tab across the whole header and
+            // pushing the other tab and the status tag out of the layout entirely.
+            .drawBehind {
+                if (!selected) return@drawBehind
+                val thickness = 2.dp.toPx()
+                drawRect(
+                    color = indicator,
+                    topLeft = Offset(0f, size.height - thickness),
+                    size = Size(size.width, thickness),
+                )
+            }
             .padding(horizontal = Carbon.spacing.spacing05),
         contentAlignment = Alignment.Center,
     ) {
@@ -149,9 +164,6 @@ private fun HeaderTab(label: String, selected: Boolean, onClick: () -> Unit) {
             style = Carbon.type.headingCompact01,
             color = if (selected) c.textPrimary else c.textSecondary,
         )
-        if (selected) {
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp).background(c.interactive))
-        }
     }
 }
 
@@ -168,7 +180,7 @@ private fun AppMark() {
             val s = Stroke(width = 1.4f, cap = StrokeCap.Round)
             val col = androidx.compose.ui.graphics.Color.White
             // front face
-            drawRect(color = col, topLeft = Offset(0f, d), size = androidx.compose.ui.geometry.Size(w - d, h - d), style = s)
+            drawRect(color = col, topLeft = Offset(0f, d), size = Size(w - d, h - d), style = s)
             // top edges
             drawLine(col, Offset(0f, d), Offset(d, 0f), 1.4f, StrokeCap.Round)
             drawLine(col, Offset(w - d, d), Offset(w, 0f), 1.4f, StrokeCap.Round)
